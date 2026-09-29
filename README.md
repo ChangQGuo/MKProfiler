@@ -13,7 +13,7 @@
 
 The public release covers 15,278 valid ear images and approximately 0.38M kernels across 61 germplasm accessions. This repository contains the complete pipeline source, model-training tools, desktop viewer, and deployment files.
 
-![MKProfiler workflow](project_figs/figure_pipeline.png)
+![MKProfiler workflow](project_figs/Figures_github-01.tif)
 
 ## Choose how to use it
 
