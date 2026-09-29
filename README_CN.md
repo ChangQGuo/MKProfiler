@@ -13,7 +13,7 @@
 
 本项目公开处理结果包含 15,278 个有效耳穗图像，涉及约 0.38M 粒籽粒（约 38 万粒），覆盖 61 份玉米种质。本仓库包含完整 pipeline 源码、模型训练工具、桌面查看器和部署文件。
 
-![MKProfiler 全流程图](project_figs/Figures_github-01.tif)
+![MKProfiler 全流程图](project_figs/Figures_github-01.png)
 
 ## 先选择使用方式
 
