@@ -85,13 +85,13 @@ def save_metadata_edit(result_dir: str, image_name: str, key: str, value: str, e
     value = value.strip()
     if not value or value == "—":
         raise ValueError("The value cannot be empty.")
-    if key == "weight_g":
+    if key == "weight_g" and value != "-":
         try:
             weight = float(value)
         except ValueError as error:
-            raise ValueError("Weight must be a finite non-negative number.") from error
+            raise ValueError("Weight must be a finite non-negative number or '-' if unavailable.") from error
         if not math.isfinite(weight) or weight < 0:
-            raise ValueError("Weight must be a finite non-negative number.")
+            raise ValueError("Weight must be a finite non-negative number or '-' if unavailable.")
 
     root = Path(result_dir)
     metadata_path = root / "metadata.csv"

@@ -134,7 +134,7 @@ python main.py config.yaml --from-stage segmentation
 - 查看 PCA 和五维 VAE 潜空间；
 - 筛选并导出表格数据。
 
-要修改样本名称或重量，先解锁 Sample Info，修改后点击对应字段右侧的对号。修改保存到 `metadata.csv`。修改名称时，`metadata_original_plant_names.csv` 会记录名称与既有结果的对应关系，请将它与结果目录一同保留。已有下游表格和轮廓仍使用原始名称，不会自动重新生成。修改前请备份结果，并避免其他程序同时修改这些文件。
+要修改样本名称或重量，先解锁 Sample Info，修改后点击对应字段右侧的对号。没有可靠重量时可输入 `-`，表示缺失值，不按零处理。修改保存到 `metadata.csv`。修改名称时，`metadata_original_plant_names.csv` 会记录名称与既有结果的对应关系，请将它与结果目录一同保留。已有下游表格和轮廓仍使用原始名称，不会自动重新生成。修改前请备份结果，并避免其他程序同时修改这些文件。
 
 分发时可直接传送完整的 `MKProfiler.exe`。通过 Git 获取需使用 Git LFS；GitHub 的源码 ZIP 可能只包含 LFS 指针。查看器独立运行，但使用者需要准备自己的结果目录及对应照片。传输后可在 PowerShell 中执行 `Get-FileHash MKProfiler.exe -Algorithm SHA256` 核对文件哈希。
 

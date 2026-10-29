@@ -118,6 +118,8 @@ class SampleInfoPanel(QScrollArea):
             edit = QLineEdit("—")
             edit.setReadOnly(True)
             edit.setFont(QFont("Times New Roman", 14))
+            if key == "weight_g":
+                edit.setToolTip("Enter a non-negative weight or '-' when no reliable value is available.")
             edit.textChanged.connect(lambda text, k=key: self._on_meta_changed(k, text))
             self._meta_edits[key] = edit
             save = QPushButton("✓")

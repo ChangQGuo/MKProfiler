@@ -72,6 +72,67 @@ def test_weight_is_saved_only_after_click_and_cache_is_updated(app, results):
     assert panel._save_btns["weight_g"].isHidden()
 
 
+def test_missing_weight_marker_can_be_confirmed_reloaded_and_corrected(app, results):
+    root, loader = results
+    panel = SampleInfoPanel()
+    panel.load_sample("image_a.jpg", loader)
+    panel._lock_btn.click()
+    panel._meta_edits["weight_g"].setText("-")
+    assert read_rows(root / "metadata.csv")[0]["weight_g"] == "1.25"
+    assert not panel._save_btns["weight_g"].isHidden()
+    panel._save_btns["weight_g"].click()
+    assert read_rows(root / "metadata.csv")[0]["weight_g"] == "-"
+    assert read_rows(root / "metadata.csv")[1]["weight_g"] == "2.50"
+    panel.load_sample("image_b.jpg", loader)
+    panel.load_sample("image_a.jpg", loader)
+    assert panel._meta_edits["weight_g"].text() == "-"
+    reopened = DataLoader()
+    assert reopened.load(str(root)).ok
+    panel.load_sample("image_a.jpg", reopened)
+    assert panel._meta_edits["weight_g"].text() == "-"
+    panel._meta_edits["weight_g"].setText("4.25")
+    panel._save_btns["weight_g"].click()
+    assert read_rows(root / "metadata.csv")[0]["weight_g"] == "4.25"
+
+
+def test_missing_weight_is_not_calculated_as_zero_in_analysis(app, tmp_path):
+    import pandas as pd
+    from grainprofiler.widgets.sample_analysis_window import SampleAnalysisWindow
+    path = tmp_path / "plant_medians.csv"
+    path.write_text(
+        "plant_name,weight_g,n_kernels,median_length_mm\n"
+        "A,-,4,10\nB,4.0,2,11\nC,0,0,12\n",
+        encoding="utf-8",
+    )
+    window = SampleAnalysisWindow(str(path))
+    assert window.is_ok
+    assert window._df.loc[0, "weight_g"] == "-"
+    assert pd.isna(window._df.loc[0, "weight_per_kernel_g"])
+    assert window._df.loc[1, "weight_per_kernel_g"] == 2.0
+    assert pd.isna(window._df.loc[2, "weight_per_kernel_g"])
+
+
+def test_missing_weight_caption_has_no_gram_unit(app, results):
+    from PySide6.QtGui import QImage
+    from grainprofiler.widgets.sample_view import SampleView
+    root, loader = results
+    image = QImage(100, 80, QImage.Format_RGB888)
+    image.fill(0xFFFFFF)
+    assert image.save(str(root / "image_a.jpg"))
+    view = SampleView()
+    view.load_sample("image_a.jpg", loader)
+    panel = SampleInfoPanel()
+    panel.metadata_saved.connect(view.update_metadata_caption)
+    panel.load_sample("image_a.jpg", loader)
+    panel._lock_btn.click()
+    panel._meta_edits["weight_g"].setText("-")
+    panel._save_btns["weight_g"].click()
+    assert view._caption_label.text().strip().endswith("|  -")
+    assert "-g" not in view._caption_label.text()
+    view.load_sample("image_a.jpg", loader)
+    assert view._caption_label.text().strip().endswith("|  -")
+
+
 def test_rename_preserves_csv_text_and_latent_precision(app, results):
     root, loader = results
     panel = SampleInfoPanel()

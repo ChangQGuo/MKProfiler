@@ -263,7 +263,8 @@ class SampleView(QGraphicsView):
         meta = data_loader.get_image_metadata(image_name)
         pn = str(meta.get("plant_name", "?")) if meta is not None else "?"
         wt = str(meta.get("weight_g", "?")) if meta is not None else "?"
-        label = QGraphicsSimpleTextItem(f"  {pn}  |  {wt}g  ")
+        weight_display = wt if wt == "-" else f"{wt}g"
+        label = QGraphicsSimpleTextItem(f"  {pn}  |  {weight_display}  ")
         label.setZValue(10)
         label.setFont(QFont("Times New Roman", 22, QFont.Bold))
         label.setBrush(QBrush(QColor(255, 255, 255)))
@@ -464,7 +465,9 @@ class SampleView(QGraphicsView):
         meta = self._data_loader.get_image_metadata(image_name)
         if meta is None:
             return
-        self._caption_label.setText(f"  {meta.get('plant_name', '?')}  |  {meta.get('weight_g', '?')}g  ")
+        wt = str(meta.get("weight_g", "?"))
+        weight_display = wt if wt == "-" else f"{wt}g"
+        self._caption_label.setText(f"  {meta.get('plant_name', '?')}  |  {weight_display}  ")
         rect = QRectF(self._caption_label.boundingRect())
         rect.moveTo(8, 8)
         if self._caption_bg is not None:

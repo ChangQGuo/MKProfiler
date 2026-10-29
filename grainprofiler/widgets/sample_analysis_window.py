@@ -41,8 +41,10 @@ class SampleAnalysisWindow(QWidget):
 
         # Compute weight_per_kernel_g
         if "weight_g" in self._df.columns and "n_kernels" in self._df.columns:
+            weights = pd.to_numeric(self._df["weight_g"], errors="coerce")
+            counts = pd.to_numeric(self._df["n_kernels"], errors="coerce").replace(0, np.nan)
             self._df["weight_per_kernel_g"] = (
-                self._df["weight_g"] / self._df["n_kernels"].replace(0, np.nan)
+                weights / counts
             )
             self._traits.append(("weight_per_kernel_g", "Weight per Kernel (g)"))
 

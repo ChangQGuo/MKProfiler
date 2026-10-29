@@ -134,7 +134,7 @@ python main.py config.yaml --from-stage segmentation
 - view PCA and the five-dimensional VAE latent space;
 - filter and export table data.
 
-To correct a sample name or weight, unlock Sample Info, edit the value, then click the checkmark beside that field. Corrections are saved in `metadata.csv`. When a name changes, `metadata_original_plant_names.csv` records its association with existing derived results; keep this file with the result folder. Existing derived tables and profiles retain their original names and are not regenerated automatically. Keep a backup before editing, and avoid simultaneous edits to the same files by other programs.
+To correct a sample name or weight, unlock Sample Info, edit the value, then click the checkmark beside that field. Enter `-` for weight when no reliable measurement is available; it is treated as missing, not zero. Corrections are saved in `metadata.csv`. When a name changes, `metadata_original_plant_names.csv` records its association with existing derived results; keep this file with the result folder. Existing derived tables and profiles retain their original names and are not regenerated automatically. Keep a backup before editing, and avoid simultaneous edits to the same files by other programs.
 
 For distribution, transfer the complete `MKProfiler.exe` without recompressing it through image or document software. Git clones require Git LFS to fetch the binary; a repository source ZIP may contain an LFS pointer instead. The viewer runs independently, while users must supply their own result folder and associated photos. Transfer hashes can be checked with `Get-FileHash MKProfiler.exe -Algorithm SHA256` in PowerShell.
 
