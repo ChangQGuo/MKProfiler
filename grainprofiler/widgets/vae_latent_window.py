@@ -109,7 +109,7 @@ class VAELatentWindow(QWidget):
         # Latent traits
         import pandas as pd
         try:
-            df = pd.read_csv(latent_csv)
+            df = pd.read_csv(latent_csv, dtype=str, keep_default_na=False)
             for _, row in df.iterrows():
                 plant = str(row.iloc[0])
                 vals = [float(row.iloc[i + 1]) for i in range(5)]

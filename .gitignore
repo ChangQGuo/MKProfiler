@@ -3,8 +3,12 @@
 # ============================================================
 
 # --- Large binaries ---
-# grainprofiler.exe (~148 MB) exceeds GitHub's 100 MB per-file limit, so it is
+# MKProfiler.exe exceeds GitHub's 100 MB per-file limit, so it is
 # tracked via Git LFS instead — see .gitattributes.
+grainprofiler_prev.exe
+grainprofiler_before_mkprofiler_*.exe
+MKProfiler_Windows_*.zip
+MKProfiler_Windows_*.sha256.txt
 
 # --- Test / input data (raw images are NOT committed) ---
 test_image_data/

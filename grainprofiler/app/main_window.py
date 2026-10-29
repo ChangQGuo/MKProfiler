@@ -165,7 +165,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("MKProfiler — Maize Kernel Phenotyping Inspector")
+        self.setWindowTitle("MKProfiler — Maize Kernel Profiler")
         self.setMinimumSize(WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT)
 
         # Application font — use Times New Roman on Windows, serif on Linux
@@ -373,6 +373,13 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_folder_opened(self, result_dir: str) -> None:
+        if self._info_panel is not None and self._info_panel.has_pending_metadata_edits():
+            answer = QMessageBox.question(
+                self, "Unsaved metadata", "Discard unconfirmed metadata changes and open another folder?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                return
         dl = DataLoader()
         result = dl.load(result_dir)
         if not result.ok:
@@ -428,7 +435,7 @@ class MainWindow(QMainWindow):
         QMessageBox.about(
             self, "About MKProfiler",
             "MKProfiler v1.0.0\n\n"
-            "Maize Kernel Phenotyping Result Inspector\n\n"
+            "Maize Kernel Profiler\n\n"
             "Desktop tool for visually inspecting pipeline outputs.\n"
             "No GPU or pipeline dependencies required.",
         )
@@ -456,6 +463,7 @@ class MainWindow(QMainWindow):
         self._sample_view.navigate_next.connect(self._on_navigate_next)
         self._info_panel.kernel_row_selected.connect(self._on_kernel_selected_from_table)
         self._info_panel.kernel_row_double_clicked.connect(self._open_kernel_detail)
+        self._info_panel.metadata_saved.connect(self._sample_view.update_metadata_caption)
 
         # Top area: SampleView | SimilarityBoxPlot (box plot added when median shown)
         self._top_splitter = QSplitter(Qt.Horizontal)
@@ -780,19 +788,7 @@ class MainWindow(QMainWindow):
             self._mark_kernel_deleted_in_bbox(result_dir, image_name, kid)
 
         # 3. Remove from in-memory DataLoader so the UI reflects the deletion
-        try:
-            dl.measurements = dl.measurements[dl.measurements["kernel_name"] != kn]
-        except Exception:
-            pass
-        kn_image = dl.kernel_to_image.get(kn)
-        dl.kernel_to_image.pop(kn, None)
-        dl.kernel_width_profiles.pop(kn, None)
-        dl.contours.pop(kn, None)
-        if kn_image:
-            stem = Path(kn_image).stem
-            cache = dl._contour_cache.get(stem)
-            if cache is not None and kn in cache:
-                del cache[kn]
+        dl.remove_kernel(kn)
 
         # 4. Show reminder
         QMessageBox.information(
@@ -1017,6 +1013,14 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def closeEvent(self, event) -> None:
+        if self._info_panel is not None and self._info_panel.has_pending_metadata_edits():
+            answer = QMessageBox.question(
+                self, "Unsaved metadata", "Discard unconfirmed metadata changes and exit?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                event.ignore()
+                return
         settings = QSettings("grainprofiler", "grainprofiler")
         settings.setValue("window_geometry", self.saveGeometry())
         if self._splitter is not None:

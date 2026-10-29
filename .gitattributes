@@ -1,1 +1,1 @@
-grainprofiler.exe filter=lfs diff=lfs merge=lfs -text
+MKProfiler.exe filter=lfs diff=lfs merge=lfs -text

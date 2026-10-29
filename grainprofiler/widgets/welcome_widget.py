@@ -20,7 +20,7 @@ class WelcomeWidget(QFrame):
         title.setAlignment(Qt.AlignCenter)
         title.setFont(QFont("Times New Roman", 38, QFont.Bold))
 
-        subtitle = QLabel("Maize Kernel Phenotyping Result Inspector")
+        subtitle = QLabel("Maize Kernel Profiler")
         subtitle.setAlignment(Qt.AlignCenter)
         subtitle.setFont(QFont("Times New Roman", 18))
 

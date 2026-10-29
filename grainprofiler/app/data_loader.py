@@ -46,6 +46,11 @@ class DataLoader:
         self.kernel_width_profiles: dict[str, list[float]] = {}  # kernel_name → 100 width values
         self.image_to_plant: dict[str, str] = {}           # image_name → plant_name
         self.latent_traits: pd.DataFrame = pd.DataFrame()   # plant_id + latent_1..latent_5
+        # O(1) lookup caches (built once at load)
+        self._meas_index: pd.DataFrame | None = None
+        self._meta_index: pd.DataFrame | None = None
+        self._plant_index: pd.DataFrame | None = None
+        self.image_to_kernels: dict[str, list[str]] = {}   # image_name → [kernel_name]
 
     # ------------------------------------------------------------------
     # Public API
@@ -70,10 +75,21 @@ class DataLoader:
             errors.append("measurements.csv (or .parquet) missing or unreadable")
             return LoadResult(ok=False, errors=errors)
         self.measurements = meas
+        # Pre-index once: avoids repeated set_index()/full-table scans per lookup.
+        if "kernel_name" in meas.columns:
+            self._meas_index = meas.drop_duplicates("kernel_name").set_index(
+                "kernel_name", drop=False)
 
-        meta = self._read_csv(rp / "metadata.csv")
+        meta = self._read_csv(
+            rp / "metadata.csv",
+            dtype={"image_name": "string", "plant_name": "string", "weight_g": "string"},
+            keep_default_na=False, na_values=[""],
+        )
         if meta is not None:
             self.metadata = meta
+            if "image_name" in meta.columns:
+                self._meta_index = meta.drop_duplicates("image_name").set_index(
+                    "image_name", drop=False)
         else:
             warnings.append("metadata.csv not found")
 
@@ -87,11 +103,14 @@ class DataLoader:
         if final is not None:
             self.final_individual = final
 
-        pm = self._read_csv(rp / "final_output_plant_median.csv")
+        pm = self._read_csv(rp / "final_output_plant_median.csv", dtype={"plant_name": "string"}, keep_default_na=False, na_values=[""])
         if pm is not None:
             self.plant_medians = pm
+            if "plant_name" in pm.columns:
+                self._plant_index = pm.drop_duplicates("plant_name").set_index(
+                    "plant_name", drop=False)
 
-        lt = self._read_csv(rp / "latent_traits.csv")
+        lt = self._read_csv(rp / "latent_traits.csv", dtype={"plant_id": "string"}, keep_default_na=False, na_values=[""])
         if lt is not None:
             self.latent_traits = lt
 
@@ -132,7 +151,10 @@ class DataLoader:
         # --- derive image list ---
         self._build_image_list()
         self._build_kernel_to_image_map()
-        self._build_image_to_plant_map()
+        try:
+            self._build_image_to_plant_map()
+        except ValueError as error:
+            return LoadResult(ok=False, errors=[str(error)])
 
         total = len(self.measurements)
         return LoadResult(
@@ -149,8 +171,23 @@ class DataLoader:
 
     def get_kernels_for_sample(self, image_name: str) -> list[str]:
         """Return kernel_names belonging to *image_name*."""
-        prefix = Path(image_name).stem
-        return [k for k in self.kernel_to_image if self.kernel_to_image[k] == image_name]
+        return list(self.image_to_kernels.get(image_name, []))
+
+    def remove_kernel(self, kernel_name: str) -> None:
+        """Remove a deleted kernel from every in-memory lookup."""
+        if "kernel_name" in self.measurements.columns:
+            self.measurements = self.measurements[self.measurements["kernel_name"] != kernel_name]
+        if self._meas_index is not None:
+            self._meas_index = self._meas_index.drop(kernel_name, errors="ignore")
+        image = self.kernel_to_image.pop(kernel_name, None)
+        if image:
+            self.image_to_kernels[image] = [
+                item for item in self.image_to_kernels.get(image, []) if item != kernel_name
+            ]
+            self._contour_cache.get(Path(image).stem, {}).pop(kernel_name, None)
+        self.kernel_width_profiles.pop(kernel_name, None)
+        self.contours.pop(kernel_name, None)
+        self.axis_results.pop(kernel_name, None)
 
     def get_kernel_contour(self, kernel_name: str) -> ContourData | None:
         # Fast path: already in legacy full-load dict
@@ -207,22 +244,26 @@ class DataLoader:
         return det.box
 
     def get_kernel_measurement(self, kernel_name: str) -> pd.Series | None:
-        df = self.measurements
-        if df.empty:
+        if self._meas_index is None:
             return None
-        df = df.set_index("kernel_name", drop=False)
         try:
-            return df.loc[kernel_name]
+            return self._meas_index.loc[kernel_name]
         except KeyError:
             return None
 
     def get_image_metadata(self, image_name: str) -> pd.Series | None:
-        df = self.metadata
-        if df.empty:
+        if self._meta_index is None:
             return None
-        df = df.set_index("image_name", drop=False)
         try:
-            return df.loc[image_name]
+            return self._meta_index.loc[image_name]
+        except KeyError:
+            return None
+
+    def get_plant_median(self, plant_name: str) -> pd.Series | None:
+        if self._plant_index is None:
+            return None
+        try:
+            return self._plant_index.loc[plant_name]
         except KeyError:
             return None
 
@@ -245,9 +286,9 @@ class DataLoader:
             return None
 
     @staticmethod
-    def _read_csv(path: Path) -> pd.DataFrame | None:
+    def _read_csv(path: Path, **kwargs) -> pd.DataFrame | None:
         try:
-            return pd.read_csv(path)
+            return pd.read_csv(path, **kwargs)
         except Exception:
             return None
 
@@ -377,26 +418,46 @@ class DataLoader:
             self.image_names = list(self.metadata["image_name"].astype(str))
 
     def _build_kernel_to_image_map(self) -> None:
-        """Map kernel_name -> image_name for fast lookup."""
+        """Map kernel_name <-> image_name for fast lookup (both directions)."""
         for kn in self.measurements.get("kernel_name", []):
             m = _KERNEL_NAME_RE.match(Path(str(kn)).stem)
             if m:
-                self.kernel_to_image[str(kn)] = m.group(1) + ".jpg"
+                img = m.group(1) + ".jpg"
+                self.kernel_to_image[str(kn)] = img
+                self.image_to_kernels.setdefault(img, []).append(str(kn))
 
     def _build_image_to_plant_map(self) -> None:
-        """Map image_name -> plant_name from metadata."""
+        """Map images to the original IDs used by existing derived results."""
+        self.image_to_plant.clear()
         if self.metadata.empty:
             return
+        associations = {}
+        mapping_path = Path(self.result_dir) / "metadata_original_plant_names.csv"
+        if mapping_path.exists():
+            mapping = self._read_csv(mapping_path, dtype=str, keep_default_na=False)
+            columns = ["image_name", "source_plant_name", "current_plant_name"]
+            if mapping is None or list(mapping.columns) != columns or mapping["image_name"].duplicated().any():
+                raise ValueError("Invalid metadata_original_plant_names.csv; cannot safely associate derived results.")
+            associations = {
+                row["image_name"]: (row["source_plant_name"], row["current_plant_name"])
+                for _, row in mapping.iterrows()
+            }
         for _, row in self.metadata.iterrows():
             img = str(row.get("image_name", ""))
             plant = str(row.get("plant_name", ""))
-            if img and plant:
-                self.image_to_plant[img] = plant
+            if img:
+                if img in associations:
+                    source, current = associations[img]
+                    self.image_to_plant[img] = source if current == plant else ""
+                else:
+                    self.image_to_plant[img] = plant
 
     def get_median_profile(self, image_name: str) -> list[float] | None:
         """Return the 100-point median width profile for an image's plant."""
         plant = self.image_to_plant.get(image_name, "")
         if not plant:
+            if image_name in self.image_to_plant:
+                return None
             # Try fuzzy match
             stem = Path(image_name).stem
             for p in self.median_profiles:

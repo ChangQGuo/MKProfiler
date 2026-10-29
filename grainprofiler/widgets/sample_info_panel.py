@@ -2,18 +2,21 @@
 
 from __future__ import annotations
 
+import csv
 import re
+from pathlib import Path
 
 import pandas as pd
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QFont
+from PySide6.QtCore import Qt, QRectF, QSize, Signal
+from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
     QFileDialog, QFormLayout, QFrame, QGroupBox, QHBoxLayout, QHeaderView,
-    QLabel, QLineEdit, QPushButton, QScrollArea, QTableView,
+    QLabel, QLineEdit, QMessageBox, QPushButton, QScrollArea, QTableView,
     QVBoxLayout, QWidget,
 )
 
 from grainprofiler.app.data_loader import DataLoader
+from grainprofiler.app.metadata_edit import save_metadata_edit
 from grainprofiler.models.pandas_model import PandasModel
 from grainprofiler.models.sort_filter_proxy import SortFilterProxy
 
@@ -66,6 +69,7 @@ class CalPandasModel(PandasModel):
 class SampleInfoPanel(QScrollArea):
     kernel_row_selected = Signal(str)
     kernel_row_double_clicked = Signal(str)
+    metadata_saved = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -77,6 +81,10 @@ class SampleInfoPanel(QScrollArea):
         self._current_image: str = ""
         self._kernel_names: list[str] = []
         self._table_columns_sized: bool = False
+        self._saved_meta_values: dict[str, str] = {}
+        self._pending_meta: dict[str, dict[str, str]] = {}
+        self._pending_meta_baselines: dict[str, dict[str, str]] = {}
+        self._loading_metadata = False
 
         container = QWidget()
         self.setWidget(container)
@@ -88,11 +96,14 @@ class SampleInfoPanel(QScrollArea):
         mg_header = QHBoxLayout()
 
         # Lock toggle
-        self._lock_btn = QPushButton("Locked")
+        self._lock_btn = QPushButton()
         self._lock_btn.setCheckable(True)
         self._lock_btn.setChecked(True)
-        self._lock_btn.setFixedWidth(100)
+        self._lock_btn.setFixedSize(36, 36)
+        self._lock_btn.setIconSize(QSize(24, 24))
+        self._lock_btn.setStyleSheet("padding: 0; margin: 0;")
         self._lock_btn.toggled.connect(self._on_lock_toggled)
+        self._update_lock_icon(True)
         mg_header.addWidget(QLabel(""))
         mg_header.addStretch()
         mg_header.addWidget(self._lock_btn)
@@ -100,15 +111,28 @@ class SampleInfoPanel(QScrollArea):
 
         self._meta_form = QFormLayout()
         self._meta_edits: dict[str, QLineEdit | QLabel] = {}
+        self._save_btns: dict[str, QPushButton] = {}
         self._meta_readonly_vals: dict[str, str] = {}
 
         for key in ["plant_name", "weight_g"]:
             edit = QLineEdit("—")
             edit.setReadOnly(True)
             edit.setFont(QFont("Times New Roman", 14))
-            edit.editingFinished.connect(lambda k=key: self._on_meta_edited(k))
+            edit.textChanged.connect(lambda text, k=key: self._on_meta_changed(k, text))
             self._meta_edits[key] = edit
-            self._meta_form.addRow(key.replace("_", " ").title() + ":", edit)
+            save = QPushButton("✓")
+            save.setFixedSize(34, 34)
+            save.setStyleSheet("padding: 0; margin: 0; color: #31a354; font-weight: bold;")
+            save.setToolTip(f"Save {key.replace('_', ' ')}")
+            save.setAccessibleName(f"Save {key.replace('_', ' ')}")
+            save.clicked.connect(lambda _checked=False, k=key: self._on_meta_edited(k))
+            save.hide()
+            self._save_btns[key] = save
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.addWidget(edit, 1)
+            row.addWidget(save)
+            self._meta_form.addRow(key.replace("_", " ").title() + ":", row)
 
         for key in ["mm_per_px", "kernel_count"]:
             lbl = QLabel("—")
@@ -117,6 +141,10 @@ class SampleInfoPanel(QScrollArea):
             self._meta_form.addRow(key.replace("_", " ").title() + ":", lbl)
 
         mg_layout.addLayout(self._meta_form)
+        self._meta_notice = QLabel("")
+        self._meta_notice.setWordWrap(True)
+        self._meta_notice.hide()
+        mg_layout.addWidget(self._meta_notice)
         mg.setLayout(mg_layout)
         layout.addWidget(mg)
 
@@ -166,17 +194,27 @@ class SampleInfoPanel(QScrollArea):
 
     # ------------------------------------------------------------------
     def load_sample(self, image_name: str, data_loader: DataLoader) -> None:
+        if self._data_loader is not None and self._data_loader is not data_loader:
+            self._pending_meta.clear()
+            self._pending_meta_baselines.clear()
         self._data_loader = data_loader
         self._current_image = image_name
         meta = data_loader.get_image_metadata(image_name)
-        if meta is not None:
+        self._loading_metadata = True
+        try:
             for key, widget in self._meta_edits.items():
-                val = meta.get(key, "—")
+                val = meta.get(key, "—") if meta is not None else "—"
                 text = str(val) if not pd.isna(val) else "—"
                 if isinstance(widget, QLineEdit):
-                    widget.setText(text)
+                    self._saved_meta_values[key] = self._pending_meta_baselines.get(image_name, {}).get(key, text)
+                    widget.setText(self._pending_meta.get(image_name, {}).get(key, text))
                 else:
                     widget.setText(text)
+        finally:
+            self._loading_metadata = False
+        for key, button in self._save_btns.items():
+            button.setVisible(key in self._pending_meta.get(image_name, {}))
+        self._meta_notice.hide()
         self._kernel_names = data_loader.get_kernels_for_sample(image_name)
         self._meta_edits["kernel_count"].setText(str(len(self._kernel_names)))
         self._build_table(data_loader)
@@ -185,15 +223,8 @@ class SampleInfoPanel(QScrollArea):
     def _load_plant_summary(self, dl: DataLoader, image_name: str) -> None:
         """Populate plant-level median stats for the current image's plant."""
         plant = dl.image_to_plant.get(image_name, "")
-        pm = dl.plant_medians
-        if pm is None or pm.empty or not plant:
-            for lbl in self._plant_lbls.values():
-                lbl.setText("—")
-            return
-        df = pm.set_index("plant_name", drop=False)
-        try:
-            row = df.loc[plant]
-        except KeyError:
+        row = dl.get_plant_median(plant) if plant else None
+        if row is None:
             for lbl in self._plant_lbls.values():
                 lbl.setText("—")
             return
@@ -259,58 +290,113 @@ class SampleInfoPanel(QScrollArea):
                     header.resizeSection(c, w)
 
     def set_dark_theme(self, dark: bool) -> None:
+        self._dark_mode = dark
         self.setStyleSheet(_STYLE_DARK if dark else _STYLE_LIGHT)
+        if hasattr(self, "_lock_btn"):
+            self._update_lock_icon(self._lock_btn.isChecked())
 
     # ------------------------------------------------------------------
     # Editable sample info
     # ------------------------------------------------------------------
 
     def _on_lock_toggled(self, checked: bool) -> None:
-        self._lock_btn.setText("Locked" if checked else "Unlocked")
+        self._update_lock_icon(checked)
         for key in ("plant_name", "weight_g"):
             w = self._meta_edits.get(key)
             if isinstance(w, QLineEdit):
                 w.setReadOnly(checked)
 
+    def _update_lock_icon(self, locked: bool) -> None:
+        pixmap = QPixmap(24, 24)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(QPen(QColor("#eeeeee" if self._dark_mode else "#222222"), 2))
+        painter.drawRoundedRect(QRectF(5, 10, 14, 11), 2, 2)
+        shackle = QPainterPath()
+        if locked:
+            shackle.moveTo(8, 10)
+            shackle.lineTo(8, 7)
+            shackle.cubicTo(8, 1, 16, 1, 16, 7)
+            shackle.lineTo(16, 10)
+        else:
+            shackle.moveTo(8, 10)
+            shackle.lineTo(8, 7)
+            shackle.cubicTo(8, 1, 16, 1, 17, 5)
+        painter.drawPath(shackle)
+        painter.drawLine(12, 14, 12, 18)
+        painter.end()
+        self._lock_btn.setIcon(QIcon(pixmap))
+        self._lock_btn.setToolTip("Unlock sample metadata" if locked else "Lock sample metadata")
+        self._lock_btn.setAccessibleName("Locked" if locked else "Unlocked")
+
+    def _on_meta_changed(self, key: str, text: str) -> None:
+        if self._loading_metadata or not self._current_image:
+            return
+        if text == self._saved_meta_values.get(key):
+            pending = self._pending_meta.get(self._current_image, {})
+            pending.pop(key, None)
+            baseline = self._pending_meta_baselines.get(self._current_image, {})
+            baseline.pop(key, None)
+            if not baseline:
+                self._pending_meta_baselines.pop(self._current_image, None)
+            if not pending:
+                self._pending_meta.pop(self._current_image, None)
+        else:
+            if key not in self._pending_meta.get(self._current_image, {}):
+                self._pending_meta_baselines.setdefault(self._current_image, {})[key] = self._saved_meta_values[key]
+            self._pending_meta.setdefault(self._current_image, {})[key] = text
+        self._save_btns[key].setVisible(key in self._pending_meta.get(self._current_image, {}))
+        self._meta_notice.hide()
+
+    def has_pending_metadata_edits(self) -> bool:
+        return bool(self._pending_meta)
+
     def _on_meta_edited(self, key: str) -> None:
-        """Sync edit back to metadata.csv and related files."""
+        """Save only the field confirmed by its checkmark."""
         if self._data_loader is None or not self._current_image:
             return
         w = self._meta_edits.get(key)
         if not isinstance(w, QLineEdit):
             return
-        new_val = w.text().strip()
-        if not new_val or new_val == "—":
+        if key not in self._pending_meta.get(self._current_image, {}):
             return
         dl = self._data_loader
         image = self._current_image
+        try:
+            warning = save_metadata_edit(dl.result_dir, image, key, w.text(), self._saved_meta_values[key])
+        except (OSError, UnicodeError, ValueError, csv.Error) as error:
+            QMessageBox.warning(self, "Unable to save", str(error))
+            return
 
-        # Update metadata.csv in memory
-        if not dl.metadata.empty and "image_name" in dl.metadata.columns:
-            mask = dl.metadata["image_name"] == image
-            if mask.any() and key in dl.metadata.columns:
-                try:
-                    if key == "weight_g":
-                        dl.metadata.loc[mask, key] = float(new_val)
-                    else:
-                        dl.metadata.loc[mask, key] = new_val
-                except ValueError:
-                    return
-            # Write back to disk
-            import os
-            csv_path = os.path.join(dl.result_dir, "metadata.csv")
-            dl.metadata.to_csv(csv_path, index=False)
-
-        # If plant_name changed, update image_to_plant mapping
-        if key == "plant_name":
-            old_plant = dl.image_to_plant.get(image, "")
-            dl.image_to_plant[image] = new_val
-            # Update latent_traits.csv if present
-            if not dl.latent_traits.empty:
-                lt_path = os.path.join(dl.result_dir, "latent_traits.csv")
-                if "plant_id" in dl.latent_traits.columns:
-                    dl.latent_traits.loc[dl.latent_traits["plant_id"] == old_plant, "plant_id"] = new_val
-                    dl.latent_traits.to_csv(lt_path, index=False, float_format='%.6f')
+        metadata = dl._read_csv(
+            Path(dl.result_dir) / "metadata.csv",
+            dtype={"image_name": "string", "plant_name": "string", "weight_g": "string"},
+            keep_default_na=False, na_values=[""],
+        )
+        if metadata is not None:
+            dl.metadata = metadata
+            dl._meta_index = metadata.drop_duplicates("image_name").set_index("image_name", drop=False)
+            try:
+                dl._build_image_to_plant_map()
+            except ValueError as error:
+                QMessageBox.warning(self, "Saved, but reload failed", str(error))
+        else:
+            QMessageBox.warning(self, "Saved, but reload failed", "Reopen the result folder to refresh the display.")
+        self._saved_meta_values[key] = w.text().strip()
+        self._loading_metadata = True
+        w.setText(self._saved_meta_values[key])
+        self._loading_metadata = False
+        self._pending_meta[image].pop(key, None)
+        if not self._pending_meta[image]:
+            del self._pending_meta[image]
+        self._pending_meta_baselines[image].pop(key, None)
+        if not self._pending_meta_baselines[image]:
+            del self._pending_meta_baselines[image]
+        self._save_btns[key].hide()
+        self._meta_notice.setText(warning or "Saved in metadata.csv. Existing derived tables are not regenerated.")
+        self._meta_notice.show()
+        self.metadata_saved.emit(image)
 
     def update_calibration(self, cal_data: dict[str, float]) -> None:
         if self._pandas_model is None:

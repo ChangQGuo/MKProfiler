@@ -1,6 +1,6 @@
 <div align="center">
 
-# **MKProfiler**（Maize-Kernel Profiler）
+# **MKProfiler**（Maize Kernel Profiler）
 
 ### 玉米籽粒高通量二维形态表型系统
 
@@ -19,8 +19,8 @@
 
 ### 结果检查：Windows
 
-1. 下载或克隆本仓库。
-2. 双击 `grainprofiler.exe` 启动 MKProfiler。
+1. 使用 Git LFS 克隆本仓库（克隆前执行 `git lfs install`），或从作者处获取完整的 `MKProfiler.exe`。
+2. 双击 `MKProfiler.exe` 启动 MKProfiler。
 3. 点击 **Open Folder**，选择包含 `measurements.csv`（或 `measurements.parquet`）和 `metadata.csv` 的pipeline结果目录。
 
 桌面软件不需要 Python、CUDA、conda 环境。
@@ -126,13 +126,17 @@ python main.py config.yaml --from-stage segmentation
 
 ## MKProfiler 桌面软件
 
-`grainprofiler.exe` 是 Windows 10/11 结果查看软件，可以：
+`MKProfiler.exe` 是 Windows 10/11 结果查看软件，可以：
 
 - 浏览样本和托盘照片；
 - 叠加籽粒轮廓和主轴端点；
 - 查看单粒指标和植株级中位数轮廓；
 - 查看 PCA 和五维 VAE 潜空间；
 - 筛选并导出表格数据。
+
+要修改样本名称或重量，先解锁 Sample Info，修改后点击对应字段右侧的对号。修改保存到 `metadata.csv`。修改名称时，`metadata_original_plant_names.csv` 会记录名称与既有结果的对应关系，请将它与结果目录一同保留。已有下游表格和轮廓仍使用原始名称，不会自动重新生成。修改前请备份结果，并避免其他程序同时修改这些文件。
+
+分发时可直接传送完整的 `MKProfiler.exe`。通过 Git 获取需使用 Git LFS；GitHub 的源码 ZIP 可能只包含 LFS 指针。查看器独立运行，但使用者需要准备自己的结果目录及对应照片。传输后可在 PowerShell 中执行 `Get-FileHash MKProfiler.exe -Algorithm SHA256` 核对文件哈希。
 
 桌面软件源码位于 `grainprofiler/`。从源码运行：
 

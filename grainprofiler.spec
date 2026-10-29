@@ -4,12 +4,12 @@
 # Build:
 #   pyinstaller grainprofiler.spec
 #
-# Output will be in dist/grainprofiler.exe
+# Output will be in dist/MKProfiler.exe
 
 import sys
 from pathlib import Path
 
-_project = Path(r"C:\Users\HP\Desktop\Academic Presentation\seed_project\a_aguo_test_new")
+_project = Path(SPECPATH)
 _grainprofiler = _project / "grainprofiler"
 
 a = Analysis(
@@ -29,7 +29,6 @@ a = Analysis(
         # Data
         "pandas",
         "numpy",
-        "numpy.core._methods",
         # OpenCV (headless — no Qt conflict)
         "cv2",
         # matplotlib
@@ -70,6 +69,10 @@ a = Analysis(
     noarchive=False,
 )
 
+# QtCore imports the Windows ICU API. A third-party icuuc.dll discovered on
+# PATH can shadow the Windows library while exporting incompatible symbols.
+a.binaries = [item for item in a.binaries if item[0].replace("\\", "/").lower() != "icuuc.dll"]
+
 pyz = PYZ(a.pure, a.zipped_data, cipher=None)
 
 exe = EXE(
@@ -79,7 +82,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name="grainprofiler",
+    name="MKProfiler",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

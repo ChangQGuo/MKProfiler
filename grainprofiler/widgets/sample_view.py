@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
+
 import numpy as np
-from PySide6.QtCore import Qt, QPointF, QRectF, Signal
+from PySide6.QtCore import Qt, QPointF, QRectF, QSize, Signal
 from PySide6.QtGui import (
-    QBrush, QColor, QFont, QPainter, QPainterPath,
+    QBrush, QColor, QFont, QImage, QImageIOHandler, QImageReader, QPainter, QPainterPath,
     QPen, QPixmap, QPolygonF,
 )
 from PySide6.QtWidgets import (
@@ -22,7 +24,6 @@ from PySide6.QtWidgets import (
 from grainprofiler.app.data_loader import DataLoader
 from grainprofiler.graphics.kernel_contour_item import KernelContourItem
 from grainprofiler.utils.coordinate_transform import transform_contour
-from grainprofiler.utils.image_conversion import cv2_to_qpixmap, load_image
 from grainprofiler.utils.photo_finder import find_photo
 
 
@@ -70,6 +71,11 @@ class SampleView(QGraphicsView):
         self.viewport().setMouseTracking(True)
 
         self._photo_pixmap: QPixmap | None = None
+        self._caption_label: QGraphicsSimpleTextItem | None = None
+        self._caption_bg: QGraphicsRectItem | None = None
+        self._pixmap_cache: OrderedDict[tuple[str, int], tuple[QPixmap, int, int]] = OrderedDict()
+        self._pixmap_cache_max: int = 8
+        self._pixmap_max_dim: int = 2400
         self._contour_items: dict[str, KernelContourItem] = {}
         self._overlay_items: list = []
         self._selected_kernel: str | None = None
@@ -198,6 +204,37 @@ class SampleView(QGraphicsView):
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+    def _load_cached_pixmap(self, path: str):
+        """Decode a tray photo at display resolution (JPEG scaled decode) and cache it."""
+        key = (path, self._pixmap_max_dim)
+        hit = self._pixmap_cache.get(key)
+        if hit is not None:
+            self._pixmap_cache.move_to_end(key)
+            return hit
+        reader = QImageReader(path)
+        reader.setAutoTransform(True)
+        size = reader.size()
+        if size.isValid() and size.width() > 0:
+            full_w, full_h = size.width(), size.height()
+            scale = min(1.0, self._pixmap_max_dim / max(full_w, full_h))
+            if scale < 1.0:
+                reader.setScaledSize(QSize(max(1, int(full_w * scale)),
+                                           max(1, int(full_h * scale))))
+            img = reader.read()
+            if reader.transformation() & QImageIOHandler.Transformation.TransformationRotate90:
+                full_w, full_h = full_h, full_w
+        else:
+            img = QImage(path)
+            full_w, full_h = img.width(), img.height()
+        if img.isNull():
+            return None
+        pix = QPixmap.fromImage(img)
+        entry = (pix, full_w, full_h)
+        self._pixmap_cache[key] = entry
+        while len(self._pixmap_cache) > self._pixmap_cache_max:
+            self._pixmap_cache.popitem(last=False)
+        return entry
+
     def load_sample(self, image_name: str, data_loader: DataLoader) -> None:
         self._data_loader = data_loader
         self._current_image = image_name
@@ -207,18 +244,20 @@ class SampleView(QGraphicsView):
         if photo_path is None:
             self._show_error(f"Photo not found for {image_name}")
             return
-        cv_img = load_image(photo_path)
-        if cv_img is None:
+        loaded = self._load_cached_pixmap(photo_path)
+        if loaded is None:
             self._show_error(f"Failed to load: {photo_path}")
             return
-
-        pixmap = cv2_to_qpixmap(cv_img)
+        pixmap, full_w, full_h = loaded
         self._photo_pixmap = pixmap
-        self._img_h, self._img_w = cv_img.shape[:2]
+        self._img_w, self._img_h = full_w, full_h
 
         scene = self._scene
-        scene.setSceneRect(0, 0, self._img_w, self._img_h)
-        scene.addItem(QGraphicsPixmapItem(pixmap))
+        scene.setSceneRect(0, 0, full_w, full_h)
+        pix_item = QGraphicsPixmapItem(pixmap)
+        if pixmap.width() != full_w:
+            pix_item.setScale(full_w / pixmap.width())
+        scene.addItem(pix_item)
 
         # Label
         meta = data_loader.get_image_metadata(image_name)
@@ -234,6 +273,7 @@ class SampleView(QGraphicsView):
         bg.setPen(Qt.NoPen); bg.setZValue(9)
         scene.addItem(bg); self._overlay_items.append(bg)
         scene.addItem(label); self._overlay_items.append(label)
+        self._caption_label, self._caption_bg = label, bg
 
         # Contours
         for kn in data_loader.get_kernels_for_sample(image_name):
@@ -414,6 +454,21 @@ class SampleView(QGraphicsView):
         self._cal_kernel_map.clear()
         self._scene.clear()
         self._photo_pixmap = None
+        self._caption_label = None
+        self._caption_bg = None
+
+    def update_metadata_caption(self, image_name: str) -> None:
+        """Refresh the visible caption after an explicit metadata save."""
+        if image_name != self._current_image or self._data_loader is None or self._caption_label is None:
+            return
+        meta = self._data_loader.get_image_metadata(image_name)
+        if meta is None:
+            return
+        self._caption_label.setText(f"  {meta.get('plant_name', '?')}  |  {meta.get('weight_g', '?')}g  ")
+        rect = QRectF(self._caption_label.boundingRect())
+        rect.moveTo(8, 8)
+        if self._caption_bg is not None:
+            self._caption_bg.setRect(rect.adjusted(-6, -4, 6, 6))
 
     def _clear_calibration(self) -> None:
         for cl in self._cal_lines:

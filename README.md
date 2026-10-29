@@ -1,6 +1,6 @@
 <div align="center">
 
-# **MKProfiler** (Maize-Kernel Profiler)
+# **MKProfiler** (Maize Kernel Profiler)
 
 ### High-throughput 2D maize-kernel phenotyping
 
@@ -19,8 +19,8 @@ The public release covers 15,278 valid ear images and approximately 0.38M kernel
 
 ### Result inspection — Windows
 
-1. Download or clone this repository.
-2. Double-click `grainprofiler.exe` to launch MKProfiler.
+1. Clone this repository with Git LFS enabled (`git lfs install` before cloning), or receive the complete `MKProfiler.exe` directly from the authors.
+2. Double-click `MKProfiler.exe` to launch MKProfiler.
 3. Click **Open Folder** and select a pipeline result directory containing `measurements.csv` (or `measurements.parquet`) and `metadata.csv`.
 
 The desktop application does not require Python, CUDA, or conda environments.
@@ -126,13 +126,17 @@ python main.py config.yaml --from-stage segmentation
 
 ## MKProfiler desktop application
 
-`grainprofiler.exe` is a Windows 10/11 result viewer. It can:
+`MKProfiler.exe` is a Windows 10/11 result viewer. It can:
 
 - browse samples and tray photos;
 - overlay kernel contours and axis endpoints;
 - inspect per-kernel traits and plant-level median profiles;
 - view PCA and the five-dimensional VAE latent space;
 - filter and export table data.
+
+To correct a sample name or weight, unlock Sample Info, edit the value, then click the checkmark beside that field. Corrections are saved in `metadata.csv`. When a name changes, `metadata_original_plant_names.csv` records its association with existing derived results; keep this file with the result folder. Existing derived tables and profiles retain their original names and are not regenerated automatically. Keep a backup before editing, and avoid simultaneous edits to the same files by other programs.
+
+For distribution, transfer the complete `MKProfiler.exe` without recompressing it through image or document software. Git clones require Git LFS to fetch the binary; a repository source ZIP may contain an LFS pointer instead. The viewer runs independently, while users must supply their own result folder and associated photos. Transfer hashes can be checked with `Get-FileHash MKProfiler.exe -Algorithm SHA256` in PowerShell.
 
 The desktop source is in `grainprofiler/`. To run it from source:
 
