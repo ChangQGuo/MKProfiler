@@ -407,7 +407,7 @@ class SampleInfoPanel(QScrollArea):
         for r in range(len(df)):
             display = str(df.iat[r, 0])
             # Full kernel name
-            stem = self._current_image.replace(".jpg", "")
+            stem = Path(self._current_image).stem
             full = f"{stem}_kernel_{display}.jpg"
             if full in cal_data:
                 df.iat[r, df.columns.get_loc(_CAL_COL)] = cal_data[full]
@@ -450,7 +450,7 @@ class SampleInfoPanel(QScrollArea):
         row_data = self._pandas_model.get_row_data(src.row())
         if row_data is not None:
             dn = str(row_data.get("kernel_name", ""))
-            stem = self._current_image.replace(".jpg", "")
+            stem = Path(self._current_image).stem
             full = f"{stem}_kernel_{dn}.jpg"
             self.kernel_row_selected.emit(full)
 
@@ -461,6 +461,6 @@ class SampleInfoPanel(QScrollArea):
         row_data = self._pandas_model.get_row_data(src.row())
         if row_data is not None:
             dn = str(row_data.get("kernel_name", ""))
-            stem = self._current_image.replace(".jpg", "")
+            stem = Path(self._current_image).stem
             full = f"{stem}_kernel_{dn}.jpg"
             self.kernel_row_double_clicked.emit(full)

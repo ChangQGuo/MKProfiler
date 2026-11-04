@@ -8,6 +8,7 @@
 grainprofiler_prev.exe
 grainprofiler_before_mkprofiler_*.exe
 MKProfiler_before_weightfix_*.exe
+MKProfiler_before_v1_1_*.exe
 MKProfiler_Windows_*.zip
 MKProfiler_Windows_*.sha256.txt
 

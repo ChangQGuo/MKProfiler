@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont, QPainter, QPixmap
-from PySide6.QtCore import QSettings
+from PySide6.QtCore import QEvent, QSettings, Qt
+from PySide6.QtGui import QAction, QFont, QKeySequence, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
+    QKeySequenceEdit,
+    QLabel,
     QMainWindow,
     QMessageBox,
     QSplitter,
@@ -17,6 +21,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from grainprofiler import __version__
 from grainprofiler.app.data_loader import DataLoader
 from grainprofiler.app.settings import WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH
 from grainprofiler.widgets.nav_panel import NavPanel
@@ -182,7 +187,8 @@ class MainWindow(QMainWindow):
         self._data_loader: DataLoader | None = None
         self._result_dir: str = ""
 
-        self._nav_panel = NavPanel()
+        self._settings = QSettings("grainprofiler", "grainprofiler")
+        self._nav_panel = NavPanel(settings=self._settings)
         self._welcome = WelcomeWidget()
 
         self._dark_mode = True
@@ -209,6 +215,11 @@ class MainWindow(QMainWindow):
         self._build_menu_bar()
         self._build_status_bar()
         self._build_cal_toolbar()
+        self._previous_key = QKeySequence(str(self._settings.value("shortcuts/previous", "Left")))
+        self._next_key = QKeySequence(str(self._settings.value("shortcuts/next", "Right")))
+        if self._previous_key.isEmpty() or self._next_key.isEmpty() or self._previous_key == self._next_key:
+            self._previous_key, self._next_key = QKeySequence("Left"), QKeySequence("Right")
+        QApplication.instance().installEventFilter(self)
 
         self.setCentralWidget(self._stack)
 
@@ -322,6 +333,11 @@ class MainWindow(QMainWindow):
         trait_action.triggered.connect(self._on_trait_analysis)
         analyze_menu.addAction(trait_action)
 
+        settings_menu = mb.addMenu("&Settings")
+        shortcut_action = QAction("Keyboard shortcuts...", self)
+        shortcut_action.triggered.connect(self._show_shortcut_settings)
+        settings_menu.addAction(shortcut_action)
+
         help_menu = mb.addMenu("&Help")
         about_action = QAction("&About", self)
         about_action.triggered.connect(self._show_about)
@@ -391,13 +407,19 @@ class MainWindow(QMainWindow):
             self._status.showMessage(f"Loaded with {len(result.warnings)} warning(s)")
         self._build_workspace()
         self._restore_splitter_sizes()
-        self._nav_panel.populate(dl.get_sample_ids(), result_dir)
+        plant_names = {}
+        if {"image_name", "plant_name"} <= set(dl.metadata.columns):
+            metadata = dl.metadata[["image_name", "plant_name"]].fillna("").drop_duplicates("image_name")
+            plant_names = {str(row.image_name): str(row.plant_name) for row in metadata.itertuples(index=False)}
+        self._nav_panel.populate(dl.get_sample_ids(), result_dir, plant_names=plant_names)
         self._median_action.setEnabled(True)
         self._cal_action.setEnabled(True)
         self._status.showMessage(
             f"Loaded {len(dl.image_names)} samples, {result.total_kernels} kernels"
         )
         self._stack.setCurrentIndex(1)
+        if self._sample_view is not None:
+            self._sample_view.setFocus(Qt.OtherFocusReason)
         # Save last folder + recent list
         settings = QSettings("grainprofiler", "grainprofiler")
         settings.setValue("last_folder", result_dir)
@@ -415,6 +437,91 @@ class MainWindow(QMainWindow):
             self._hide_median_chart()
             self._show_median_chart(image_name)
         self._status.showMessage(f"Sample: {image_name}")
+
+    def _on_metadata_saved(self, image_name: str) -> None:
+        if self._sample_view is not None:
+            self._sample_view.update_metadata_caption(image_name)
+        if self._data_loader is not None:
+            metadata = self._data_loader.get_image_metadata(image_name)
+            if metadata is not None:
+                name = metadata.get("plant_name", "")
+                self._nav_panel.update_plant_name(image_name, str(name) if name is not None else "")
+
+    def _set_navigation_shortcuts(self, previous: str, next_: str) -> None:
+        previous_key = QKeySequence.fromString(previous, QKeySequence.PortableText)
+        next_key = QKeySequence.fromString(next_, QKeySequence.PortableText)
+        if previous_key.isEmpty() or next_key.isEmpty() or previous_key.count() != 1 or next_key.count() != 1:
+            raise ValueError("Choose one key combination for each direction.")
+        if previous_key == next_key:
+            raise ValueError("Previous and next must use different shortcuts.")
+        reserved = {
+            action.shortcut().toString(QKeySequence.PortableText)
+            for action in self.findChildren(QAction) if not action.shortcut().isEmpty()
+        }
+        previous_text = previous_key.toString(QKeySequence.PortableText)
+        next_text = next_key.toString(QKeySequence.PortableText)
+        if previous_text in reserved or next_text in reserved:
+            raise ValueError("This shortcut is already used by a menu action.")
+        self._previous_key, self._next_key = previous_key, next_key
+        self._settings.setValue("shortcuts/previous", previous_text)
+        self._settings.setValue("shortcuts/next", next_text)
+
+    def _show_shortcut_settings(self) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Keyboard shortcuts")
+        form = QFormLayout(dialog)
+        previous = QKeySequenceEdit(self._previous_key, dialog)
+        next_ = QKeySequenceEdit(self._next_key, dialog)
+        previous.setMaximumSequenceLength(1)
+        next_.setMaximumSequenceLength(1)
+        form.addRow("Previous image:", previous)
+        form.addRow("Next image:", next_)
+        form.addRow(QLabel("Shortcuts work while the photo or sample list has focus."))
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel | QDialogButtonBox.RestoreDefaults)
+        form.addRow(buttons)
+
+        def save():
+            try:
+                self._set_navigation_shortcuts(
+                    previous.keySequence().toString(QKeySequence.PortableText),
+                    next_.keySequence().toString(QKeySequence.PortableText),
+                )
+            except ValueError as error:
+                QMessageBox.warning(dialog, "Invalid shortcuts", str(error))
+                return
+            dialog.accept()
+
+        def reset():
+            previous.setKeySequence(QKeySequence("Left"))
+            next_.setKeySequence(QKeySequence("Right"))
+
+        buttons.accepted.connect(save)
+        buttons.rejected.connect(dialog.reject)
+        buttons.button(QDialogButtonBox.RestoreDefaults).clicked.connect(reset)
+        dialog.exec()
+
+    def eventFilter(self, watched, event):
+        if (
+            event.type() == QEvent.KeyPress
+            and isinstance(watched, QWidget)
+            and watched.window() is self
+            and self._data_loader is not None
+            and self._stack.currentWidget() is self._splitter
+        ):
+            focus = QApplication.focusWidget()
+            allowed = (self, self._splitter, self._nav_panel._list, self._nav_panel._list.viewport())
+            if self._sample_view is not None:
+                allowed += (self._sample_view, self._sample_view.viewport())
+            if focus not in allowed:
+                return False
+            key = QKeySequence(event.keyCombination())
+            if key == self._previous_key:
+                self._on_navigate_prev()
+                return True
+            if key == self._next_key:
+                self._on_navigate_next()
+                return True
+        return super().eventFilter(watched, event)
 
     def _export_current_csv(self) -> None:
         if self._info_panel is not None:
@@ -434,7 +541,7 @@ class MainWindow(QMainWindow):
     def _show_about(self) -> None:
         QMessageBox.about(
             self, "About MKProfiler",
-            "MKProfiler v1.0.0\n\n"
+            f"MKProfiler v{__version__}\n\n"
             "Maize Kernel Profiler\n\n"
             "Desktop tool for visually inspecting pipeline outputs.\n"
             "No GPU or pipeline dependencies required.",
@@ -463,7 +570,7 @@ class MainWindow(QMainWindow):
         self._sample_view.navigate_next.connect(self._on_navigate_next)
         self._info_panel.kernel_row_selected.connect(self._on_kernel_selected_from_table)
         self._info_panel.kernel_row_double_clicked.connect(self._open_kernel_detail)
-        self._info_panel.metadata_saved.connect(self._sample_view.update_metadata_caption)
+        self._info_panel.metadata_saved.connect(self._on_metadata_saved)
 
         # Top area: SampleView | SimilarityBoxPlot (box plot added when median shown)
         self._top_splitter = QSplitter(Qt.Horizontal)
@@ -784,8 +891,9 @@ class MainWindow(QMainWindow):
         except (TypeError, ValueError):
             kid = None
         image_name = dl.kernel_to_image.get(kn)
-        if kid is not None and image_name:
-            self._mark_kernel_deleted_in_bbox(result_dir, image_name, kid)
+        bbox_name = dl.get_bbox_image_name(image_name) if image_name else None
+        if kid is not None and bbox_name:
+            self._mark_kernel_deleted_in_bbox(result_dir, bbox_name, kid)
 
         # 3. Remove from in-memory DataLoader so the UI reflects the deletion
         dl.remove_kernel(kn)
@@ -1029,6 +1137,7 @@ class MainWindow(QMainWindow):
             settings.setValue("median_splitter_sizes", self._median_splitter.sizes())
         if self._top_splitter is not None:
             settings.setValue("top_splitter_sizes", self._top_splitter.sizes())
+        self._settings.sync()
         super().closeEvent(event)
 
     def _restore_window_state(self) -> None:
@@ -1059,23 +1168,9 @@ class MainWindow(QMainWindow):
     def _on_navigate_prev(self) -> None:
         if self._data_loader is None:
             return
-        ids = self._data_loader.get_sample_ids()
-        img = self._current_image_name
-        if img in ids:
-            idx = ids.index(img)
-            if idx > 0:
-                new_img = ids[idx - 1]
-                self._nav_panel._list.setCurrentRow(idx - 1)
-                self._on_sample_selected(new_img)
+        self._nav_panel.navigate(-1)
 
     def _on_navigate_next(self) -> None:
         if self._data_loader is None:
             return
-        ids = self._data_loader.get_sample_ids()
-        img = self._current_image_name
-        if img in ids:
-            idx = ids.index(img)
-            if idx < len(ids) - 1:
-                new_img = ids[idx + 1]
-                self._nav_panel._list.setCurrentRow(idx + 1)
-                self._on_sample_selected(new_img)
+        self._nav_panel.navigate(1)

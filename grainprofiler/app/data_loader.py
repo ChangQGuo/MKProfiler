@@ -18,6 +18,7 @@ from grainprofiler.app.models import (
 )
 
 _KERNEL_NAME_RE = re.compile(r"^(.+)_kernel_(\d+)(\.jpg)?$")
+_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp"}
 
 
 class DataLoader:
@@ -41,7 +42,11 @@ class DataLoader:
         self._contour_cache_max: int = 5
         self.axis_results: dict[str, AxisData] = {}
         self.bounding_boxes: dict[str, YoloData] = {}
+        self._bbox_names_by_casefold: dict[str, str] = {}
+        self._ambiguous_bbox_names: set[str] = set()
         self.kernel_to_image: dict[str, str] = {}
+        self._image_names_by_stem: dict[str, str] = {}
+        self._ambiguous_image_stems: set[str] = set()
         self.median_profiles: dict[str, list[float]] = {}  # plant_name → 100 width values
         self.kernel_width_profiles: dict[str, list[float]] = {}  # kernel_name → 100 width values
         self.image_to_plant: dict[str, str] = {}           # image_name → plant_name
@@ -90,6 +95,15 @@ class DataLoader:
             if "image_name" in meta.columns:
                 self._meta_index = meta.drop_duplicates("image_name").set_index(
                     "image_name", drop=False)
+                for image_name in meta["image_name"].dropna().astype(str):
+                    path = Path(image_name)
+                    if path.suffix.casefold() not in _IMAGE_EXTENSIONS:
+                        continue
+                    stem = path.stem
+                    if stem in self._image_names_by_stem and self._image_names_by_stem[stem] != image_name:
+                        self._ambiguous_image_stems.add(stem)
+                    else:
+                        self._image_names_by_stem[stem] = image_name
         else:
             warnings.append("metadata.csv not found")
 
@@ -149,9 +163,9 @@ class DataLoader:
             self._index_kernel_width_profiles(kernel_profiles_raw)
 
         # --- derive image list ---
-        self._build_image_list()
-        self._build_kernel_to_image_map()
         try:
+            self._build_image_list()
+            self._build_kernel_to_image_map()
             self._build_image_to_plant_map()
         except ValueError as error:
             return LoadResult(ok=False, errors=[str(error)])
@@ -225,12 +239,22 @@ class DataLoader:
     def get_kernel_axis(self, kernel_name: str) -> AxisData | None:
         return self.axis_results.get(kernel_name)
 
+    def get_bbox_image_name(self, image_name: str) -> str | None:
+        """Resolve a unique bounding-box key without guessing between case variants."""
+        if image_name in self.bounding_boxes:
+            return image_name
+        folded = image_name.casefold()
+        if folded in self._ambiguous_bbox_names:
+            return None
+        return self._bbox_names_by_casefold.get(folded)
+
     def get_kernel_box(self, kernel_name: str) -> tuple[int, int, int, int] | None:
         """Return the YOLO detection box [x1,y1,x2,y2] for *kernel_name* in full-image coords."""
         image_name = self.kernel_to_image.get(kernel_name)
         if image_name is None:
             return None
-        yolo = self.bounding_boxes.get(image_name)
+        bbox_name = self.get_bbox_image_name(image_name)
+        yolo = self.bounding_boxes.get(bbox_name) if bbox_name is not None else None
         if yolo is None:
             return None
 
@@ -349,8 +373,10 @@ class DataLoader:
     def _index_contour_files(self, contours_dir: Path) -> None:
         """Scan per-image contour files — lazily loaded on demand."""
         for f in contours_dir.glob("*_contours.json"):
-            # filename format: <image_name>.jpg_contours.json
-            stem = f.name.replace("_contours.json", "").replace(".jpg", "")
+            # Filename format: <image_name>_contours.json.
+            name = f.name.removesuffix("_contours.json")
+            image_path = Path(name)
+            stem = image_path.stem if image_path.suffix.casefold() in _IMAGE_EXTENSIONS else name
             self._contour_files[stem] = f
 
     def _index_axis(self, raw: list[dict]) -> None:
@@ -373,6 +399,11 @@ class DataLoader:
 
     def _index_bboxes(self, raw: dict) -> None:
         for image_name, data in raw.items():
+            folded = image_name.casefold()
+            if folded in self._bbox_names_by_casefold and self._bbox_names_by_casefold[folded] != image_name:
+                self._ambiguous_bbox_names.add(folded)
+            else:
+                self._bbox_names_by_casefold[folded] = image_name
             dets: dict[int, YoloDetection] = {}
             accepted = data.get("accepted_detections") or data.get("detections") or []
             for d in accepted:
@@ -408,28 +439,32 @@ class DataLoader:
         for kn in self.measurements.get("kernel_name", []):
             m = _KERNEL_NAME_RE.match(Path(str(kn)).stem)
             if m:
-                image_name = m.group(1) + ".jpg"
+                stem = m.group(1)
+                if stem in self._ambiguous_image_stems:
+                    raise ValueError(f"Ambiguous image stem in metadata.csv: {stem}")
+                image_name = self._image_names_by_stem.get(stem, stem + ".jpg")
                 if image_name not in seen:
                     seen.add(image_name)
                     self.image_names.append(image_name)
 
         # Also pull from metadata if available
-        if not self.image_names and not self.metadata.empty:
-            self.image_names = list(self.metadata["image_name"].astype(str))
+        if not self.image_names and "image_name" in self.metadata.columns:
+            self.image_names = list(self.metadata["image_name"].dropna().astype(str).drop_duplicates())
 
     def _build_kernel_to_image_map(self) -> None:
         """Map kernel_name <-> image_name for fast lookup (both directions)."""
         for kn in self.measurements.get("kernel_name", []):
             m = _KERNEL_NAME_RE.match(Path(str(kn)).stem)
             if m:
-                img = m.group(1) + ".jpg"
+                stem = m.group(1)
+                img = self._image_names_by_stem.get(stem, stem + ".jpg")
                 self.kernel_to_image[str(kn)] = img
                 self.image_to_kernels.setdefault(img, []).append(str(kn))
 
     def _build_image_to_plant_map(self) -> None:
         """Map images to the original IDs used by existing derived results."""
         self.image_to_plant.clear()
-        if self.metadata.empty:
+        if self.metadata.empty or "image_name" not in self.metadata.columns:
             return
         associations = {}
         mapping_path = Path(self.result_dir) / "metadata_original_plant_names.csv"
@@ -442,7 +477,7 @@ class DataLoader:
                 row["image_name"]: (row["source_plant_name"], row["current_plant_name"])
                 for _, row in mapping.iterrows()
             }
-        for _, row in self.metadata.iterrows():
+        for _, row in self.metadata.drop_duplicates("image_name").iterrows():
             img = str(row.get("image_name", ""))
             plant = str(row.get("plant_name", ""))
             if img:

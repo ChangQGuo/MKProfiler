@@ -124,7 +124,7 @@ python main.py config.yaml --from-stage segmentation
 - `axis_results.json`：单粒主轴端点和测量状态。
 - `subimages/`、`masks_binary/`、`contours/`：桌面软件查看所需的中间结果。
 
-## MKProfiler 桌面软件
+## MKProfiler 桌面软件 v1.1
 
 `MKProfiler.exe` 是 Windows 10/11 结果查看软件，可以：
 
@@ -133,6 +133,8 @@ python main.py config.yaml --from-stage segmentation
 - 查看单粒指标和植株级中位数轮廓；
 - 查看 PCA 和五维 VAE 潜空间；
 - 筛选并导出表格数据。
+
+软件会记住每个结果目录上次查看的图片。输入图片名或 plant name 后按回车跳转；使用左右方向键切换，或在 **Settings → Keyboard shortcuts** 中自定义。鼠标悬停样本并点击 **…**，可置顶、复制图片名或设置仅在软件中显示的别名。
 
 要修改样本名称或重量，先解锁 Sample Info，修改后点击对应字段右侧的对号。没有可靠重量时可输入 `-`，表示缺失值，不按零处理。修改保存到 `metadata.csv`。修改名称时，`metadata_original_plant_names.csv` 会记录名称与既有结果的对应关系，请将它与结果目录一同保留。已有下游表格和轮廓仍使用原始名称，不会自动重新生成。修改前请备份结果，并避免其他程序同时修改这些文件。
 
