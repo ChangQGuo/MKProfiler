@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import re
 import sys
 from pathlib import Path
 
@@ -19,6 +21,22 @@ _ICON_PNG = (
     Path(__file__).resolve().parent.parent
     / "grainprofiler_minifig" / "图标.png"
 )
+
+
+def _signal_update_ready() -> None:
+    """Acknowledge an update only after the packaged window has opened."""
+    value = os.environ.pop("MKPROFILER_UPDATE_READY", "")
+    if not value or not getattr(sys, "frozen", False):
+        return
+    marker = Path(value)
+    if (not marker.is_absolute() or marker.parent != Path(sys.executable).absolute().parent
+            or not re.fullmatch(r"\.MKProfiler-update-[0-9a-f]{32}\.ready", marker.name)):
+        return
+    try:
+        with marker.open("x", encoding="ascii") as output:
+            output.write("ready")
+    except OSError:
+        pass
 
 
 def main() -> None:
@@ -40,6 +58,7 @@ def main() -> None:
 
     window = MainWindow()
     window.show()
+    QTimer.singleShot(0, _signal_update_ready)
 
     sys.exit(app.exec())
 

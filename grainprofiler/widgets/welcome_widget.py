@@ -1,7 +1,6 @@
 """Welcome / placeholder widget shown before a result folder is opened."""
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QFrame, QLabel, QVBoxLayout
 
 
@@ -18,16 +17,14 @@ class WelcomeWidget(QFrame):
         title = QLabel("MKProfiler")
         title.setObjectName("welcomeTitle")
         title.setAlignment(Qt.AlignCenter)
-        title.setFont(QFont("Times New Roman", 38, QFont.Bold))
 
         subtitle = QLabel("Maize Kernel Profiler")
+        subtitle.setObjectName("welcomeSubtitle")
         subtitle.setAlignment(Qt.AlignCenter)
-        subtitle.setFont(QFont("Times New Roman", 18))
 
         hint = QLabel("Open a result folder to begin  ->  File  |  Open Result Folder")
         hint.setAlignment(Qt.AlignCenter)
         hint.setObjectName("welcomeHint")
-        hint.setFont(QFont("Times New Roman", 14))
 
         layout.addWidget(title)
         layout.addWidget(subtitle)

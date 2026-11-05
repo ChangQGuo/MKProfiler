@@ -2,18 +2,26 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QSettings, Qt
+import re
+import sys
+from pathlib import Path
+from threading import Thread
+
+from PySide6.QtCore import QEvent, QObject, QSettings, Qt, Signal
 from PySide6.QtGui import QAction, QFont, QKeySequence, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QFontComboBox,
     QKeySequenceEdit,
     QLabel,
     QMainWindow,
     QMessageBox,
     QSplitter,
+    QSpinBox,
     QStackedWidget,
     QStatusBar,
     QToolBar,
@@ -22,10 +30,15 @@ from PySide6.QtWidgets import (
 )
 
 from grainprofiler import __version__
+from grainprofiler.app.appearance import THEMES, appearance_stylesheet
 from grainprofiler.app.data_loader import DataLoader
 from grainprofiler.app.settings import WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH
+from grainprofiler.app.updater import check_for_update, prepare_update, schedule_install
+from grainprofiler.resources.action_icons import action_icon
 from grainprofiler.widgets.nav_panel import NavPanel
 from grainprofiler.widgets.welcome_widget import WelcomeWidget
+
+_SETTINGS_NO_ERROR = QSettings.NoError
 
 # ---------------------------------------------------------------------------
 # Theme stylesheets
@@ -35,6 +48,7 @@ _DARK_THEME = """
     QMainWindow { background-color: #2B2B2B; color: #E0E0E0; }
     QLabel { color: #FFFFFF; }
     QLabel#welcomeTitle { font-size: 34px; font-weight: bold; color: #7BAFD4; }
+    QLabel#welcomeSubtitle { font-size: 18px; }
     QLabel#welcomeHint { font-size: 15px; color: #AAA; }
     QLabel#navPathLabel { font-size: 13px; color: #999; }
     QLabel#navCountLabel { font-size: 13px; color: #999; }
@@ -102,6 +116,7 @@ _LIGHT_THEME = """
     QMainWindow { background-color: #F5F5F5; color: #222; }
     QLabel { color: #222; }
     QLabel#welcomeTitle { font-size: 34px; font-weight: bold; color: #2C6FAC; }
+    QLabel#welcomeSubtitle { font-size: 18px; }
     QLabel#welcomeHint { font-size: 15px; color: #666; }
     QLabel#navPathLabel { font-size: 13px; color: #555; }
     QLabel#navCountLabel { font-size: 13px; color: #555; }
@@ -165,6 +180,11 @@ _LIGHT_THEME = """
 """
 
 
+class _UpdateSignals(QObject):
+    checked = Signal(object, str, bool)
+    downloaded = Signal(object, str)
+
+
 class MainWindow(QMainWindow):
     """grainprofiler application window."""
 
@@ -175,23 +195,36 @@ class MainWindow(QMainWindow):
 
         # Application font — use Times New Roman on Windows, serif on Linux
         import platform
-        font = QFont("serif" if platform.system() == "Linux" else "Times New Roman", 14)
-        QApplication.instance().setFont(font)
+        default_family = "serif" if platform.system() == "Linux" else "Times New Roman"
 
-        # App icon and global corn cursor
+        # Keep the corn cursor inside the photo; splitters retain their resize cursor.
         from grainprofiler.resources.cursors import create_app_icon, create_corn_cursor
         QApplication.instance().setWindowIcon(create_app_icon())
         self._corn_cursor = create_corn_cursor()
-        QApplication.setOverrideCursor(self._corn_cursor)
 
         self._data_loader: DataLoader | None = None
         self._result_dir: str = ""
+        self._update_checking = False
+        self._update_downloading = False
+        self._closing = False
+        self._update_status_checks = 0
+        self._update_signals = _UpdateSignals()
+        self._update_signals.checked.connect(self._on_update_checked)
+        self._update_signals.downloaded.connect(self._on_update_downloaded)
 
         self._settings = QSettings("grainprofiler", "grainprofiler")
+        self._theme_name = str(self._settings.value("appearance/theme", "dark"))
+        if self._theme_name not in THEMES:
+            self._theme_name = "dark"
+        self._font_family = str(self._settings.value("appearance/font_family", default_family) or default_family)
+        try:
+            self._font_size = max(10, min(22, int(self._settings.value("appearance/font_size", 14))))
+        except (TypeError, ValueError):
+            self._font_size = 14
         self._nav_panel = NavPanel(settings=self._settings)
         self._welcome = WelcomeWidget()
 
-        self._dark_mode = True
+        self._dark_mode = THEMES[self._theme_name][1]
         self._apply_theme()
         self._restore_window_state()
 
@@ -226,40 +259,78 @@ class MainWindow(QMainWindow):
         # Wire signals
         self._nav_panel.folder_opened.connect(self._on_folder_opened)
         self._nav_panel.sample_selected.connect(self._on_sample_selected)
-        self._nav_panel.theme_toggled.connect(self._on_theme_toggled)
 
         # Auto-load last folder
         from PySide6.QtCore import QTimer
         QTimer.singleShot(100, self._auto_load_last)
+        if sys.platform == "win32" and getattr(sys, "frozen", False):
+            QTimer.singleShot(1000, self._report_update_status)
+            QTimer.singleShot(5000, lambda: self._check_for_updates(manual=False))
 
     # ------------------------------------------------------------------
     # Theme
     # ------------------------------------------------------------------
 
     def _apply_theme(self) -> None:
-        self.setStyleSheet(_DARK_THEME if self._dark_mode else _LIGHT_THEME)
+        _, self._dark_mode, background, _ = THEMES[self._theme_name]
+        QApplication.instance().setFont(QFont(self._font_family, self._font_size))
+        handle = "#687f95" if self._dark_mode else "#a9b1ba"
+        checked = "#395d78" if self._dark_mode else "#d4dce5"
+        stylesheet = (_DARK_THEME if self._dark_mode else _LIGHT_THEME) + f"""
+            QSplitter::handle {{ background: {handle}; }}
+            QSplitter::handle:hover {{ background: #4b9ec8; }}
+            QSplitter::handle:pressed {{ background: #31769d; }}
+            QToolBar QToolButton:checked {{ background: {checked}; border-radius: 4px; }}
+        """
+        self.setStyleSheet(appearance_stylesheet(stylesheet, self._theme_name, self._font_size))
+        self._nav_panel.setMinimumWidth(round(220 * self._font_size / 14))
         # Update viewport background for SampleView (if already created)
         if hasattr(self, '_sample_view') and self._sample_view is not None:
             from PySide6.QtGui import QBrush, QColor
-            bg = QColor(45, 45, 45) if self._dark_mode else QColor(245, 245, 245)
-            self._sample_view.setBackgroundBrush(QBrush(bg))
+            self._sample_view.setBackgroundBrush(QBrush(QColor(background)))
         if hasattr(self, '_info_panel') and self._info_panel is not None:
-            self._info_panel.set_dark_theme(self._dark_mode)
-        # Splitter handle visibility
-        h_color = "#666" if self._dark_mode else "#BBB"
-        if hasattr(self, '_median_splitter') and self._median_splitter is not None:
-            self._median_splitter.setStyleSheet(
-                f"QSplitter::handle {{ background: {h_color}; }}"
-            )
-        if hasattr(self, '_top_splitter') and self._top_splitter is not None:
-            self._top_splitter.setStyleSheet(
-                f"QSplitter::handle {{ background: {h_color}; }}"
-            )
+            self._info_panel.setMinimumWidth(round(300 * self._font_size / 14))
+            self._info_panel.set_dark_theme(self._dark_mode, self._theme_name, self._font_size)
+        if hasattr(self, '_visual_actions'):
+            for name, action in self._visual_actions.items():
+                action.setIcon(action_icon(name, self._dark_mode))
         self._nav_panel.set_theme_state(self._dark_mode)
 
-    def _on_theme_toggled(self) -> None:
-        self._dark_mode = not self._dark_mode
+    def _set_appearance(self, theme: str, font_family: str, font_size: int) -> None:
+        if theme not in THEMES or not font_family.strip() or not 10 <= font_size <= 22:
+            raise ValueError("Choose a valid theme, font and size between 10 and 22.")
+        self._theme_name, self._font_family, self._font_size = theme, font_family, font_size
+        self._settings.setValue("appearance/theme", theme)
+        self._settings.setValue("appearance/font_family", font_family)
+        self._settings.setValue("appearance/font_size", font_size)
         self._apply_theme()
+
+    def _show_appearance_settings(self) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Appearance")
+        form = QFormLayout(dialog)
+        themes = QComboBox(dialog)
+        for key, (label, _dark, _background, _colours) in THEMES.items():
+            themes.addItem(label, key)
+        themes.setCurrentIndex(themes.findData(self._theme_name))
+        fonts = QFontComboBox(dialog)
+        fonts.setCurrentFont(QFont(self._font_family))
+        size = QSpinBox(dialog)
+        size.setRange(10, 22)
+        size.setValue(self._font_size)
+        form.addRow("Theme:", themes)
+        form.addRow("Font:", fonts)
+        form.addRow("Text size (default 14):", size)
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        form.addRow(buttons)
+
+        def save():
+            self._set_appearance(themes.currentData(), fonts.currentFont().family(), size.value())
+            dialog.accept()
+
+        buttons.accepted.connect(save)
+        buttons.rejected.connect(dialog.reject)
+        dialog.exec()
 
     # ------------------------------------------------------------------
     # Menu bar
@@ -334,14 +405,40 @@ class MainWindow(QMainWindow):
         analyze_menu.addAction(trait_action)
 
         settings_menu = mb.addMenu("&Settings")
+        appearance_action = QAction("Appearance...", self)
+        appearance_action.triggered.connect(self._show_appearance_settings)
+        settings_menu.addAction(appearance_action)
         shortcut_action = QAction("Keyboard shortcuts...", self)
         shortcut_action.triggered.connect(self._show_shortcut_settings)
         settings_menu.addAction(shortcut_action)
 
         help_menu = mb.addMenu("&Help")
+        update_action = QAction("Check for updates...", self)
+        update_action.triggered.connect(lambda: self._check_for_updates(manual=True))
+        help_menu.addAction(update_action)
         about_action = QAction("&About", self)
         about_action.triggered.connect(self._show_about)
         help_menu.addAction(about_action)
+
+        # The toolbar reuses the menu actions so their state and shortcuts stay in sync.
+        self._visual_toolbar = QToolBar("Visualization", self)
+        self._visual_toolbar.setObjectName("visualizationToolbar")
+        self._visual_toolbar.setMovable(False)
+        self._visual_toolbar.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self._visual_actions = {
+            "overlay": self._toggle_overlays_action,
+            "fit": fit_action,
+            "median": self._median_action,
+            "ruler": self._cal_action,
+            "pca": pca_action,
+            "vae": vae_action,
+            "distribution": trait_action,
+        }
+        for name, action in self._visual_actions.items():
+            action.setIcon(action_icon(name, self._dark_mode))
+            action.setToolTip(action.text().replace("&", ""))
+            self._visual_toolbar.addAction(action)
+        self.addToolBar(self._visual_toolbar)
 
     # ------------------------------------------------------------------
     # Status bar
@@ -547,6 +644,136 @@ class MainWindow(QMainWindow):
             "No GPU or pipeline dependencies required.",
         )
 
+    def _check_for_updates(self, manual: bool = False) -> None:
+        if self._closing or self._update_checking or self._update_downloading:
+            return
+        self._update_checking = True
+        signals = self._update_signals
+
+        def run():
+            try:
+                release = check_for_update(__version__, "ChangQGuo", "MKProfiler")
+                signals.checked.emit(release, "", manual)
+            except Exception as error:
+                signals.checked.emit(None, str(error), manual)
+
+        Thread(target=run, name="mkprofiler-update-check", daemon=True).start()
+
+    def _report_update_status(self) -> None:
+        value = str(self._settings.value("update/status_path", "") or "")
+        if not value or self._closing:
+            return
+        path = Path(value)
+        if (path.parent != Path(sys.executable).absolute().parent
+                or not re.fullmatch(r"MKProfiler\.exe\.update-status-[0-9a-f]{32}\.txt", path.name)):
+            return
+        try:
+            with path.open("r", encoding="ascii") as source:
+                status = source.read(64).strip()
+        except (OSError, UnicodeError):
+            return
+        if status in ("pending", "ready"):
+            self._update_status_checks += 1
+            if self._update_status_checks < 35:
+                from PySide6.QtCore import QTimer
+                QTimer.singleShot(2000, self._report_update_status)
+            return
+        if status == "installed":
+            self._status.showMessage("MKProfiler update installed", 10000)
+        elif status == "installed-unverified":
+            QMessageBox.warning(
+                self, "Update status",
+                "The new application started, but its startup could not be verified. "
+                "A backup is available in the application folder.",
+            )
+        else:
+            QMessageBox.warning(
+                self, "Update failed",
+                "The previous update failed or did not complete. A backup may be available in the application folder. "
+                "Please try again or install the new version manually.",
+            )
+        self._settings.remove("update/status_path")
+        self._settings.sync()
+
+    def _on_update_checked(self, release, error: str, manual: bool) -> None:
+        self._update_checking = False
+        if self._closing:
+            return
+        if error:
+            if manual:
+                QMessageBox.warning(self, "Update check", "Could not check for updates. Check your network connection and try again.")
+            return
+        if release is None:
+            if manual:
+                QMessageBox.information(self, "Update check", "MKProfiler is up to date.")
+            return
+        if not getattr(sys, "frozen", False):
+            QMessageBox.information(self, "Update available", f"MKProfiler v{release.version} is available on GitHub Releases. Automatic installation is available in the Windows executable.")
+            return
+        answer = QMessageBox.question(
+            self, "Update available",
+            f"MKProfiler v{release.version} is available. Download it in the background?\n\nYou can choose when to restart and install it.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if answer == QMessageBox.Yes:
+            self._start_update_download(release)
+
+    def _start_update_download(self, release) -> None:
+        if self._update_downloading or self._closing:
+            return
+        self._update_downloading = True
+        self._status.showMessage("Downloading and verifying the update in the background…")
+        signals = self._update_signals
+
+        def run():
+            try:
+                signals.downloaded.emit(prepare_update(release), "")
+            except Exception as error:
+                signals.downloaded.emit(None, str(error))
+
+        Thread(target=run, name="mkprofiler-update-download", daemon=True).start()
+
+    def _on_update_downloaded(self, prepared, error: str) -> None:
+        self._update_downloading = False
+        if self._closing:
+            if prepared is not None:
+                prepared.cleanup()
+            return
+        if error or prepared is None:
+            self._status.showMessage("Update download or verification failed")
+            QMessageBox.warning(self, "Update failed", "The update could not be downloaded or verified. Your current application has not been changed.")
+            return
+        self._status.showMessage("Update downloaded and verified")
+        if self._info_panel is not None and self._info_panel.has_pending_metadata_edits():
+            prepared.cleanup()
+            QMessageBox.warning(self, "Unsaved metadata", "Save or discard your pending metadata edits before installing an update. You can then check for updates again.")
+            return
+        answer = QMessageBox.question(
+            self, "Install update", "Restart MKProfiler and install the verified update now?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            prepared.cleanup()
+            return
+        try:
+            pending = schedule_install(prepared)
+            self._settings.setValue("update/status_path", str(pending.status_path))
+            self._settings.setValue("update/backup_path", str(pending.backup_path))
+            self._settings.setValue("update/backup_sha256", pending.backup_sha256)
+            self._settings.sync()
+            if self._settings.status() != _SETTINGS_NO_ERROR:
+                raise RuntimeError("Could not save update recovery information")
+            pending.authorize()
+        except Exception:
+            prepared.cleanup()
+            QMessageBox.warning(self, "Update failed", "The update could not be installed. Check that the application folder is writable; the existing application has not been changed.")
+            return
+        try:
+            prepared.cleanup()
+        except OSError:
+            pass
+        self.close()
+
     # ------------------------------------------------------------------
     # Workspace
     # ------------------------------------------------------------------
@@ -574,16 +801,21 @@ class MainWindow(QMainWindow):
 
         # Top area: SampleView | SimilarityBoxPlot (box plot added when median shown)
         self._top_splitter = QSplitter(Qt.Horizontal)
+        self._top_splitter.setHandleWidth(9)
         self._top_splitter.addWidget(self._sample_view)
 
         # Wrap in vertical splitter: top_splitter / median_chart
         self._median_splitter = QSplitter(Qt.Vertical)
+        self._median_splitter.setHandleWidth(9)
         self._median_splitter.addWidget(self._top_splitter)
 
         main_splitter = QSplitter(Qt.Horizontal)
+        main_splitter.setHandleWidth(9)
         main_splitter.addWidget(self._nav_panel)
         main_splitter.addWidget(self._median_splitter)
         main_splitter.addWidget(self._info_panel)
+        main_splitter.handle(1).setToolTip("Drag to resize the sample list")
+        main_splitter.handle(2).setToolTip("Drag to resize sample information")
         main_splitter.setStretchFactor(0, 0)
         main_splitter.setStretchFactor(1, 1)
         main_splitter.setStretchFactor(2, 0)
@@ -592,6 +824,7 @@ class MainWindow(QMainWindow):
 
         self._splitter = main_splitter
         self._stack.addWidget(main_splitter)
+        self._apply_theme()
 
     def _on_kernel_selected_from_view(self, kernel_name: str) -> None:
         if self._info_panel is not None:
@@ -933,7 +1166,6 @@ class MainWindow(QMainWindow):
         if self._sample_view is not None:
             self._sample_view.set_calibration_mode(checked)
             if checked:
-                QApplication.restoreOverrideCursor()  # release corn cursor
                 try:
                     self._sample_view.calibration_changed.disconnect(self._on_cal_data_changed)
                 except Exception:
@@ -941,7 +1173,6 @@ class MainWindow(QMainWindow):
                 self._sample_view.calibration_changed.connect(self._on_cal_data_changed)
             else:
                 self._sample_view.viewport().setCursor(self._corn_cursor)
-                QApplication.setOverrideCursor(self._corn_cursor)
                 try:
                     self._sample_view.calibration_changed.disconnect(self._on_cal_data_changed)
                 except Exception:
@@ -1129,6 +1360,7 @@ class MainWindow(QMainWindow):
             if answer != QMessageBox.Yes:
                 event.ignore()
                 return
+        self._closing = True
         settings = QSettings("grainprofiler", "grainprofiler")
         settings.setValue("window_geometry", self.saveGeometry())
         if self._splitter is not None:

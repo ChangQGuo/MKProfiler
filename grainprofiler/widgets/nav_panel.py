@@ -1,4 +1,4 @@
-"""Left sidebar: Open button + searchable sample list + theme toggle."""
+"""Left sidebar: open button and searchable sample list."""
 
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ from PySide6.QtGui import QColor, QIcon, QPainter, QPalette, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
-    QHBoxLayout,
     QInputDialog,
     QLabel,
     QLineEdit,
@@ -49,12 +48,10 @@ class NavPanel(QFrame):
 
     folder_opened = Signal(str)
     sample_selected = Signal(str)
-    theme_toggled = Signal()
 
     def __init__(self, parent=None, settings: QSettings | None = None):
         super().__init__(parent)
         self.setMinimumWidth(220)
-        self.setMaximumWidth(320)
         self._settings = settings if settings is not None else QSettings("grainprofiler", "grainprofiler")
         self._folder_key = ""
         self._sample_ids: list[str] = []
@@ -81,14 +78,6 @@ class NavPanel(QFrame):
         self._path_label.setWordWrap(True)
         self._path_label.setObjectName("navPathLabel")
         layout.addWidget(self._path_label)
-
-        # --- Theme toggle ---
-        theme_row = QHBoxLayout()
-        self._theme_btn = QPushButton("Light Theme")
-        self._theme_btn.clicked.connect(self._on_theme_clicked)
-        theme_row.addWidget(self._theme_btn)
-        theme_row.addStretch()
-        layout.addLayout(theme_row)
 
         # --- Filter and jump search ---
         self._filter_edit = QLineEdit()
@@ -149,7 +138,8 @@ class NavPanel(QFrame):
         self._filter_edit.blockSignals(False)
         self._search_edit.clear()
         self._last_search = ""
-        self._path_label.setText(result_dir)
+        self._path_label.setText(Path(result_dir).name or result_dir)
+        self._path_label.setToolTip(result_dir)
         remembered = str(self._settings.value(f"{self._folder_key}/last_sample", "") or "")
         self._rebuild_list(requested=remembered, force_emit=True)
 
@@ -159,6 +149,7 @@ class NavPanel(QFrame):
         self._items.clear()
         self._folder_key = ""
         self._path_label.setText("")
+        self._path_label.setToolTip("")
         self._filter_timer.stop()
         self._filter_edit.blockSignals(True)
         self._filter_edit.clear()
@@ -171,7 +162,6 @@ class NavPanel(QFrame):
 
     def set_theme_state(self, dark: bool) -> None:
         self._dark_mode = dark
-        self._theme_btn.setText("Light Theme" if dark else "Dark Theme")
         self._update_search_icon()
 
     def current_sample(self) -> str:
@@ -238,9 +228,6 @@ class NavPanel(QFrame):
         dlg_dir = QFileDialog.getExistingDirectory(self, "Select Result Folder")
         if dlg_dir:
             self.folder_opened.emit(dlg_dir)
-
-    def _on_theme_clicked(self) -> None:
-        self.theme_toggled.emit()
 
     def _on_filter_changed(self, text: str) -> None:
         self._filter_timer.start()

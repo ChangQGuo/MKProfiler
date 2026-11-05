@@ -5,16 +5,15 @@ from __future__ import annotations
 from collections import OrderedDict
 
 import numpy as np
-from PySide6.QtCore import Qt, QPointF, QRectF, QSize, Signal
+from PySide6.QtCore import QEvent, Qt, QPointF, QRectF, QSize, Signal
 from PySide6.QtGui import (
     QBrush, QColor, QFont, QImage, QImageIOHandler, QImageReader, QPainter, QPainterPath,
-    QPen, QPixmap, QPolygonF,
+    QPen, QPixmap,
 )
 from PySide6.QtWidgets import (
     QGraphicsEllipseItem,
     QGraphicsLineItem,
     QGraphicsPixmapItem,
-    QGraphicsPolygonItem,
     QGraphicsRectItem,
     QGraphicsScene,
     QGraphicsSimpleTextItem,
@@ -96,11 +95,9 @@ class SampleView(QGraphicsView):
         self._cal_labels: list[QGraphicsSimpleTextItem] = []
         self._cal_kernel_map: dict[str, float] = {}  # kernel_name → px
 
-        # Navigation arrows
-        self._nav_left: QGraphicsPolygonItem | None = None
-        self._nav_right: QGraphicsPolygonItem | None = None
-        self._nav_left_bg: QGraphicsPolygonItem | None = None
-        self._nav_right_bg: QGraphicsPolygonItem | None = None
+        # A navigation control appears only near the corresponding edge.
+        self._nav_hover: str | None = None
+        self.viewport().installEventFilter(self)
 
     # ------------------------------------------------------------------
     # Zoom
@@ -124,14 +121,13 @@ class SampleView(QGraphicsView):
             event.accept()
             return
         # Check viewport-relative nav arrows
-        if event.button() == Qt.LeftButton and not self._cal_mode:
-            p = event.pos()
+        if event.button() == Qt.LeftButton and not self._cal_mode and self._photo_pixmap is not None:
+            p = event.position()
             vw = self.viewport().width()
-            m = 8; aw = 55; ah = 80
             cy = self.viewport().height() // 2
-            if p.x() < m + aw and abs(p.y() - cy) < ah // 2:
+            if self._nav_hover == "left" and QRectF(8, cy - 24, 36, 48).contains(p):
                 self.navigate_prev.emit(); event.accept(); return
-            if p.x() > vw - m - aw and abs(p.y() - cy) < ah // 2:
+            if self._nav_hover == "right" and QRectF(vw - 44, cy - 24, 36, 48).contains(p):
                 self.navigate_next.emit(); event.accept(); return
         super().mousePressEvent(event)
 
@@ -308,7 +304,6 @@ class SampleView(QGraphicsView):
             self._overlay_items.append(citem)
 
         self._set_overlay_visibility(self._show_overlays)
-        self._build_nav_arrows()
         self.fitInView(scene.sceneRect(), Qt.KeepAspectRatio)
 
     def set_overlays_visible(self, v: bool) -> None:
@@ -355,13 +350,15 @@ class SampleView(QGraphicsView):
 
     def set_calibration_mode(self, enabled: bool) -> None:
         self._cal_mode = enabled
+        self._nav_hover = None
+        self.viewport().update()
         if enabled:
             self._cal_draw_mode = True
             self.setDragMode(QGraphicsView.NoDrag)
-            self.setCursor(Qt.CrossCursor)
+            self.viewport().setCursor(Qt.CrossCursor)
         else:
             self.setDragMode(QGraphicsView.ScrollHandDrag)
-            self.setCursor(Qt.ArrowCursor)
+            self.viewport().unsetCursor()
             self._clear_calibration()
 
     def toggle_cal_draw_mode(self) -> bool:
@@ -369,10 +366,10 @@ class SampleView(QGraphicsView):
         self._cal_draw_mode = not self._cal_draw_mode
         if self._cal_draw_mode:
             self.setDragMode(QGraphicsView.NoDrag)
-            self.setCursor(Qt.CrossCursor)
+            self.viewport().setCursor(Qt.CrossCursor)
         else:
             self.setDragMode(QGraphicsView.ScrollHandDrag)
-            self.setCursor(Qt.ArrowCursor)
+            self.viewport().setCursor(Qt.OpenHandCursor)
         return self._cal_draw_mode
 
     def delete_selected_line(self, scene_pos: QPointF) -> bool:
@@ -419,29 +416,41 @@ class SampleView(QGraphicsView):
     # ------------------------------------------------------------------
     # Navigation arrows
     # ------------------------------------------------------------------
-    def _build_nav_arrows(self) -> None:
-        self.viewport().installEventFilter(self)
-
     def drawForeground(self, painter, rect):
-        """Paint viewport-relative nav arrows (always same size regardless of zoom)."""
+        """Paint a subtle navigation chevron at the hovered viewport edge."""
+        if self._nav_hover is None or self._cal_mode or self._photo_pixmap is None:
+            return
         vp = self.viewport()
         vw, vh = vp.width(), vp.height()
-        m = 8; aw = 55; ah = 80; cy = vh // 2
+        x = 8 if self._nav_hover == "left" else vw - 44
+        cy = vh // 2
         painter.save()
-        painter.resetTransform()  # switch to viewport pixel coords
-        painter.setPen(QPen(QColor(255, 255, 255, 120), 2))
-        painter.setBrush(QBrush(QColor(255, 255, 255, 60)))
-        lp = QPolygonF([QPointF(m+aw, cy-ah/2), QPointF(m+aw, cy+ah/2), QPointF(m, cy)])
-        painter.drawPolygon(lp)
-        rp = QPolygonF([QPointF(vw-m-aw, cy-ah/2), QPointF(vw-m-aw, cy+ah/2), QPointF(vw-m, cy)])
-        painter.drawPolygon(rp)
+        painter.resetTransform()
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(20, 28, 38, 165))
+        painter.drawRoundedRect(QRectF(x, cy - 24, 36, 48), 8, 8)
+        painter.setPen(QPen(QColor(255, 255, 255, 230), 2.5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        mid = x + 18
+        direction = -1 if self._nav_hover == "left" else 1
+        path = QPainterPath(QPointF(mid - direction * 3, cy - 8))
+        path.lineTo(QPointF(mid + direction * 4, cy))
+        path.lineTo(QPointF(mid - direction * 3, cy + 8))
+        painter.drawPath(path)
         painter.restore()
 
     def eventFilter(self, obj, event):
-        from PySide6.QtCore import QEvent
-        if obj == self.viewport() and not self._cal_mode:
-            if event.type() in (QEvent.Enter, QEvent.Leave, QEvent.MouseMove):
-                self.viewport().update()  # trigger redraw for arrow hover effect
+        if obj == self.viewport() and event.type() in (QEvent.Leave, QEvent.MouseMove):
+            hover = None
+            if event.type() == QEvent.MouseMove and not self._cal_mode and self._photo_pixmap is not None:
+                x = event.position().x()
+                if x < 70:
+                    hover = "left"
+                elif x > self.viewport().width() - 70:
+                    hover = "right"
+            if hover != self._nav_hover:
+                self._nav_hover = hover
+                self.viewport().update()
         return super().eventFilter(obj, event)
 
     # ------------------------------------------------------------------

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pandas as pd
 from PySide6.QtCore import Qt, QRectF, QSize, Signal
-from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
     QFileDialog, QFormLayout, QFrame, QGroupBox, QHBoxLayout, QHeaderView,
     QLabel, QLineEdit, QMessageBox, QPushButton, QScrollArea, QTableView,
@@ -74,7 +74,6 @@ class SampleInfoPanel(QScrollArea):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMinimumWidth(300)
-        self.setMaximumWidth(500)
         self.setWidgetResizable(True)
         self.set_dark_theme(True)  # default dark
         self._data_loader: DataLoader | None = None
@@ -117,7 +116,6 @@ class SampleInfoPanel(QScrollArea):
         for key in ["plant_name", "weight_g"]:
             edit = QLineEdit("—")
             edit.setReadOnly(True)
-            edit.setFont(QFont("Times New Roman", 14))
             if key == "weight_g":
                 edit.setToolTip("Enter a non-negative weight or '-' when no reliable value is available.")
             edit.textChanged.connect(lambda text, k=key: self._on_meta_changed(k, text))
@@ -291,9 +289,18 @@ class SampleInfoPanel(QScrollArea):
                 if c < header.count():
                     header.resizeSection(c, w)
 
-    def set_dark_theme(self, dark: bool) -> None:
+    def set_dark_theme(self, dark: bool, theme: str | None = None, font_size: int = 14) -> None:
+        from grainprofiler.app.appearance import appearance_stylesheet
+
         self._dark_mode = dark
-        self.setStyleSheet(_STYLE_DARK if dark else _STYLE_LIGHT)
+        self.setStyleSheet(appearance_stylesheet(
+            _STYLE_DARK if dark else _STYLE_LIGHT, theme or ("dark" if dark else "light"), font_size,
+        ))
+        # QScrollArea can otherwise retain the previous row height after a font change.
+        for widget in getattr(self, "_meta_edits", {}).values():
+            widget.setMinimumHeight(max(widget.sizeHint().height(), widget.fontMetrics().height() + 8))
+        for widget in getattr(self, "_plant_lbls", {}).values():
+            widget.setMinimumHeight(widget.fontMetrics().height() + 4)
         if hasattr(self, "_lock_btn"):
             self._update_lock_icon(self._lock_btn.isChecked())
 

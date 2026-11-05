@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QFont, QPainter, QPixmap
+from PySide6.QtGui import QPainter, QPixmap
 from PySide6.QtWidgets import (
     QGroupBox, QHBoxLayout, QLabel, QPushButton,
     QScrollArea, QSplitter, QTableView, QVBoxLayout, QWidget, QMessageBox,
@@ -132,7 +132,6 @@ class PCAPanel(QWidget):
         left_splitter.addWidget(scatter_w)
 
         hover_lbl = QLabel("Hover over a point to see plant name")
-        hover_lbl.setFont(QFont("Times New Roman", 13))
         hover_lbl.setStyleSheet(f"color:{tc};")
         hover_lbl.setAlignment(Qt.AlignCenter)
         ll.addWidget(hover_lbl)

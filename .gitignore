@@ -11,6 +11,8 @@ MKProfiler_before_weightfix_*.exe
 MKProfiler_before_v1_1_*.exe
 MKProfiler_Windows_*.zip
 MKProfiler_Windows_*.sha256.txt
+MKProfiler_v*.zip
+MKProfiler_v*.sha256.txt
 
 # --- Test / input data (raw images are NOT committed) ---
 test_image_data/

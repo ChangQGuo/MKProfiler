@@ -124,7 +124,7 @@ python main.py config.yaml --from-stage segmentation
 - `axis_results.json`: per-kernel axis endpoints and measurement status.
 - `subimages/`, `masks_binary/`, and `contours/`: intermediate results used by the desktop viewer.
 
-## MKProfiler desktop application v1.1
+## MKProfiler desktop application v1.2
 
 `MKProfiler.exe` is a Windows 10/11 result viewer. It can:
 
@@ -135,6 +135,10 @@ python main.py config.yaml --from-stage segmentation
 - filter and export table data.
 
 The viewer remembers the last image for each result folder. Search by image name or plant name and press Enter to jump; use Left/Right to browse, or customize these keys under **Settings → Keyboard shortcuts**. Hover over a sample and click **…** to pin it, copy its image name, or set a viewer-only display label.
+
+Drag the highlighted dividers to resize the side panels. Photo navigation arrows appear near the image edges. Use the visualization toolbar for overlays, profiles, calibration and analysis. Choose a theme, font and text size under **Settings → Appearance**; the viewer remembers these settings.
+
+Starting with v1.2, the Windows application checks published GitHub Releases for updates in the background. When an update is available, choose whether to download and install it; the application verifies its checksum before replacement. Earlier versions need to be updated manually once. See the [release history](CHANGELOG.md).
 
 To correct a sample name or weight, unlock Sample Info, edit the value, then click the checkmark beside that field. Enter `-` for weight when no reliable measurement is available; it is treated as missing, not zero. Corrections are saved in `metadata.csv`. When a name changes, `metadata_original_plant_names.csv` records its association with existing derived results; keep this file with the result folder. Existing derived tables and profiles retain their original names and are not regenerated automatically. Keep a backup before editing, and avoid simultaneous edits to the same files by other programs.
 

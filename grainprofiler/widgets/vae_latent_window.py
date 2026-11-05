@@ -7,7 +7,6 @@ import sys
 
 import numpy as np
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QGroupBox,
@@ -171,7 +170,6 @@ class VAELatentWindow(QWidget):
         right = QGroupBox("Latent Dimensions (±3.5σ)")
         rl = QVBoxLayout(right)
         note = QLabel("Latents ~ N(0,1); ±3.5σ covers 99.95% of population")
-        note.setFont(QFont("Times New Roman", 10))
         note.setStyleSheet(f"color:{tc}; font-style: italic;")
         note.setWordWrap(True)
         rl.addWidget(note)
@@ -196,7 +194,6 @@ class VAELatentWindow(QWidget):
             # Spinbox + label row
             spin_row = QHBoxLayout()
             val_lbl = QLabel("0.00")
-            val_lbl.setFont(QFont("Times New Roman", 12))
             val_lbl.setStyleSheet(f"color:#7BAFD4;" if dark else "color:#2C6FAC;")
             val_lbl.setAlignment(Qt.AlignCenter)
             val_lbl.setMinimumWidth(60)
