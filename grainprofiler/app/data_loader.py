@@ -9,6 +9,7 @@ from typing import Any
 
 import pandas as pd
 
+from grainprofiler.app.csv_io import read_csv_compatible
 from grainprofiler.app.models import (
     AxisData,
     ContourData,
@@ -17,7 +18,7 @@ from grainprofiler.app.models import (
     YoloDetection,
 )
 
-_KERNEL_NAME_RE = re.compile(r"^(.+)_kernel_(\d+)(\.jpg)?$")
+_KERNEL_NAME_RE = re.compile(r"^(.+)_kernel_(\d+)(?:_round)?(\.jpg)?$")
 _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp"}
 
 
@@ -105,7 +106,7 @@ class DataLoader:
                     else:
                         self._image_names_by_stem[stem] = image_name
         else:
-            warnings.append("metadata.csv not found")
+            warnings.append("metadata.csv missing or unreadable")
 
         det = self._read_csv(rp / "detect_results.csv")
         if det is not None:
@@ -298,21 +299,21 @@ class DataLoader:
     @staticmethod
     def _read_parquet_or_csv(base: Path, stem: str) -> pd.DataFrame | None:
         pqt = base / f"{stem}.parquet"
+        csv = base / f"{stem}.csv"
+        # A spreadsheet save updates the CSV, leaving an older Parquet stale.
+        if csv.exists() and (not pqt.exists() or csv.stat().st_mtime_ns > pqt.stat().st_mtime_ns):
+            return DataLoader._read_csv(csv)
         if pqt.exists():
             try:
                 return pd.read_parquet(pqt)
             except Exception:
                 pass
-        csv = base / f"{stem}.csv"
-        try:
-            return pd.read_csv(csv)
-        except Exception:
-            return None
+        return DataLoader._read_csv(csv)
 
     @staticmethod
     def _read_csv(path: Path, **kwargs) -> pd.DataFrame | None:
         try:
-            return pd.read_csv(path, **kwargs)
+            return read_csv_compatible(path, **kwargs)
         except Exception:
             return None
 

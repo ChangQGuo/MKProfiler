@@ -24,6 +24,7 @@
 3. 点击 **Open Folder**，选择包含 `measurements.csv`（或 `measurements.parquet`）和 `metadata.csv` 的pipeline结果目录。
 
 桌面软件不需要 Python、CUDA、conda 环境。
+软件支持读取 UTF-8、带字节序标记的 UTF-16 和 GB18030 编码的 CSV；当 `measurements.csv` 比 `measurements.parquet` 更新时，优先读取 CSV。
 
 ### 处理属于你的照片：GPU + conda
 

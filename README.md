@@ -24,6 +24,7 @@ The public release covers 15,278 valid ear images and approximately 0.38M kernel
 3. Click **Open Folder** and select a pipeline result directory containing `measurements.csv` (or `measurements.parquet`) and `metadata.csv`.
 
 The desktop application does not require Python, CUDA, or conda environments.
+It reads CSV files saved as UTF-8, UTF-16 with a byte-order mark, or GB18030. If `measurements.csv` is newer than `measurements.parquet`, the viewer uses the CSV.
 
 ### Process your own photos — GPU + conda
 

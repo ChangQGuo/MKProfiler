@@ -1,5 +1,19 @@
 # MKProfiler Release Notes / 版本更新日志
 
+## v1.3 — 2026-11-09
+
+### English
+
+- Fixed loading CSV files saved by WPS or other spreadsheet programs with GB18030 or UTF-16 encoding; confirmed metadata edits preserve the original encoding.
+- Show newer edited measurements CSV files instead of older Parquet copies.
+- Include legacy `_round` kernel records in sample tables.
+
+### 中文
+
+- 修复 WPS 等表格软件保存为 GB18030 或 UTF-16 编码后，CSV 文件无法读取的问题；确认保存元数据修改时保留原编码。
+- 当修改后的测量 CSV 比 Parquet 新时，优先显示 CSV 中的数据。
+- 在样本表中显示旧版结果文件名带 `_round` 的籽粒记录。
+
 ## v1.2 — 2026-11-05
 
 ### English

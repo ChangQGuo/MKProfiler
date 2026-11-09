@@ -21,6 +21,8 @@ from PySide6.QtWidgets import (
     QMessageBox,
 )
 
+from grainprofiler.app.csv_io import read_csv_compatible
+
 
 def _get_onnx_dir() -> str:
     """Locate ONNX model files (works both dev and frozen)."""
@@ -106,9 +108,8 @@ class VAELatentWindow(QWidget):
         self._names.sort()
 
         # Latent traits
-        import pandas as pd
         try:
-            df = pd.read_csv(latent_csv, dtype=str, keep_default_na=False)
+            df = read_csv_compatible(latent_csv, dtype=str, keep_default_na=False)
             for _, row in df.iterrows():
                 plant = str(row.iloc[0])
                 vals = [float(row.iloc[i + 1]) for i in range(5)]

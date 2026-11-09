@@ -10,24 +10,24 @@ import stat
 import tempfile
 from pathlib import Path
 
+from grainprofiler.app.csv_io import decode_csv_bytes
+
 
 def _read_csv(path: Path):
     original = path.read_bytes()
-    has_bom = original.startswith(b"\xef\xbb\xbf")
-    text = original.decode("utf-8-sig")
+    text, encoding, bom = decode_csv_bytes(original)
     rows = list(csv.reader(io.StringIO(text, newline="")))
     if not rows or len(set(rows[0])) != len(rows[0]):
         raise ValueError(f"Invalid or duplicate CSV headers: {path.name}")
     if any(len(row) != len(rows[0]) for row in rows[1:]):
         raise ValueError(f"Malformed CSV row: {path.name}")
-    return original, rows, has_bom, "\r\n" if "\r\n" in text else "\n"
+    return original, rows, encoding, bom, "\r\n" if "\r\n" in text else "\n"
 
 
-def _encode_csv(rows, has_bom, newline):
+def _encode_csv(rows, encoding, bom, newline):
     output = io.StringIO(newline="")
     csv.writer(output, lineterminator=newline).writerows(rows)
-    encoded = output.getvalue().encode("utf-8")
-    return (b"\xef\xbb\xbf" + encoded) if has_bom else encoded
+    return bom + output.getvalue().encode(encoding)
 
 
 def _replace_files(changes):
@@ -95,7 +95,7 @@ def save_metadata_edit(result_dir: str, image_name: str, key: str, value: str, e
 
     root = Path(result_dir)
     metadata_path = root / "metadata.csv"
-    original, rows, bom, newline = _read_csv(metadata_path)
+    original, rows, encoding, bom, newline = _read_csv(metadata_path)
     header = rows[0]
     if "image_name" not in header or key not in header:
         raise ValueError("metadata.csv is missing the image or selected field.")
@@ -125,11 +125,11 @@ def save_metadata_edit(result_dir: str, image_name: str, key: str, value: str, e
         mapping_path = root / "metadata_original_plant_names.csv"
         columns = ["image_name", "source_plant_name", "current_plant_name"]
         if mapping_path.exists():
-            map_original, mapping, map_bom, map_newline = _read_csv(mapping_path)
+            map_original, mapping, map_encoding, map_bom, map_newline = _read_csv(mapping_path)
             if mapping[0] != columns:
                 raise ValueError("Invalid metadata_original_plant_names.csv headers.")
         else:
-            map_original, mapping, map_bom, map_newline = None, [columns], False, "\n"
+            map_original, mapping, map_encoding, map_bom, map_newline = None, [columns], "utf-8", b"", "\n"
         map_matches = [entry for entry in mapping[1:] if entry[0] == image_name]
         if len(map_matches) > 1:
             raise ValueError("Duplicate image in metadata_original_plant_names.csv.")
@@ -140,9 +140,9 @@ def save_metadata_edit(result_dir: str, image_name: str, key: str, value: str, e
             entry[2] = value
         else:
             mapping.append([image_name, old, value])
-        changes.append((mapping_path, map_original, _encode_csv(mapping, map_bom, map_newline)))
+        changes.append((mapping_path, map_original, _encode_csv(mapping, map_encoding, map_bom, map_newline)))
         warning = "Saved. Existing derived results keep their original plant ID; rerun the pipeline to update them."
     row[value_col] = value
-    changes.insert(0, (metadata_path, original, _encode_csv(rows, bom, newline)))
+    changes.insert(0, (metadata_path, original, _encode_csv(rows, encoding, bom, newline)))
     _replace_files(changes)
     return warning

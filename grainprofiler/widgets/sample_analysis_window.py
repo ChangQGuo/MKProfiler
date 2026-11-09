@@ -11,6 +11,8 @@ from PySide6.QtWidgets import (
     QPushButton, QScrollArea, QSplitter, QVBoxLayout, QWidget,
 )
 
+from grainprofiler.app.csv_io import read_csv_compatible
+
 
 class SampleAnalysisWindow(QWidget):
     """Trait distribution: box plots with outlier detection, multi-trait split view."""
@@ -31,7 +33,7 @@ class SampleAnalysisWindow(QWidget):
         self._ok = False
 
         try:
-            self._df = pd.read_csv(data_path)
+            self._df = read_csv_compatible(data_path)
         except Exception as e:
             QMessageBox.critical(self, "Error", str(e))
             return
