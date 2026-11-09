@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -9,7 +10,9 @@ from typing import Any
 
 import pandas as pd
 
-from grainprofiler.app.csv_io import read_csv_compatible
+from grainprofiler.app.csv_io import (
+    ambiguous_csv_examples, ambiguous_csv_file, csv_file_sha256, decode_csv_bytes, read_csv_compatible,
+)
 from grainprofiler.app.models import (
     AxisData,
     ContourData,
@@ -20,6 +23,10 @@ from grainprofiler.app.models import (
 
 _KERNEL_NAME_RE = re.compile(r"^(.+)_kernel_(\d+)(?:_round)?(\.jpg)?$")
 _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp"}
+_RESULT_CSVS = (
+    "measurements.csv", "metadata.csv", "detect_results.csv", "final_output_individual.csv",
+    "final_output_plant_median.csv", "latent_traits.csv", "metadata_original_plant_names.csv",
+)
 
 
 class DataLoader:
@@ -30,6 +37,16 @@ class DataLoader:
 
     def __init__(self) -> None:
         self.result_dir: str = ""
+        self.metadata_encoding: str | None = None
+        self.metadata_encoding_sha256: str | None = None
+        self.metadata_encoding_mtime_ns: int | None = None
+        self.csv_encodings: dict[str, str] = {}
+        self.csv_digests: dict[str, str] = {}
+        self.csv_mtimes: dict[str, int] = {}
+        self.analysis_file_digests: dict[str, str] = {}
+        self.analysis_file_mtimes: dict[str, int] = {}
+        self.measurement_fingerprints: dict[str, tuple[str, int]] = {}
+        self._csv_read_errors: list[str] = []
         self.image_names: list[str] = []
         self.metadata: pd.DataFrame = pd.DataFrame()
         self.detect_results: pd.DataFrame = pd.DataFrame()
@@ -51,6 +68,9 @@ class DataLoader:
         self.median_profiles: dict[str, list[float]] = {}  # plant_name → 100 width values
         self.kernel_width_profiles: dict[str, list[float]] = {}  # kernel_name → 100 width values
         self.image_to_plant: dict[str, str] = {}           # image_name → plant_name
+        self._ambiguous_originals: set[str] = set()
+        self._unverified_originals: set[str] = set()
+        self.trust_unverified_plant_ids = False
         self.latent_traits: pd.DataFrame = pd.DataFrame()   # plant_id + latent_1..latent_5
         # O(1) lookup caches (built once at load)
         self._meas_index: pd.DataFrame | None = None
@@ -62,7 +82,11 @@ class DataLoader:
     # Public API
     # ------------------------------------------------------------------
 
-    def load(self, result_dir: str) -> LoadResult:
+    def load(self, result_dir: str, *, metadata_encoding: str | None = None,
+             metadata_digest: str | None = None, trust_unverified_plant_ids: bool = False,
+             csv_encodings: dict[str, str] | None = None,
+             csv_digests: dict[str, str] | None = None,
+             csv_mtimes: dict[str, int] | None = None) -> LoadResult:
         """Read all files from *result_dir*.
 
         Returns a LoadResult.  On ``ok=True`` the DataLoader attributes
@@ -70,16 +94,81 @@ class DataLoader:
         ``errors`` and not proceed.
         """
         self.result_dir = result_dir
+        self.csv_encodings = dict(csv_encodings or {})
+        self.csv_digests = dict(csv_digests or {})
+        self.csv_mtimes = dict(csv_mtimes or {})
+        if metadata_encoding is not None:
+            self.csv_encodings["metadata.csv"] = metadata_encoding
+        if metadata_digest is not None:
+            self.csv_digests["metadata.csv"] = metadata_digest
+        self.metadata_encoding = self.csv_encodings.get("metadata.csv")
+        self.trust_unverified_plant_ids = trust_unverified_plant_ids
         errors: list[str] = []
         warnings: list[str] = []
 
         rp = Path(result_dir)
+        ambiguous = {}
+        for name in _RESULT_CSVS:
+            path = rp / name
+            if not path.is_file():
+                continue
+            try:
+                if name in self.csv_encodings:
+                    if self.csv_encodings[name] not in ("utf-8", "gb18030"):
+                        return LoadResult(ok=False, errors=[f"Unsupported selected encoding for {name}."])
+                    if name in self.csv_digests and csv_file_sha256(path) != self.csv_digests[name]:
+                        return LoadResult(ok=False, errors=[f"{name} changed while its encoding was being selected; reopen the folder."])
+                    if name in self.csv_mtimes and path.stat().st_mtime_ns != self.csv_mtimes[name]:
+                        return LoadResult(ok=False, errors=[f"{name} changed while its encoding was being selected; reopen the folder."])
+                else:
+                    examples = ambiguous_csv_file(path)
+                    if examples is not None:
+                        ambiguous[name] = examples
+            except OSError:
+                return LoadResult(ok=False, errors=[f"Cannot read {name}; reopen the result folder."])
+        if ambiguous:
+            return LoadResult(ok=False, errors=["Choose an encoding for the listed CSV files."], ambiguous_csvs=ambiguous)
+        for name in ("measurements.csv", "measurements.parquet"):
+            path = rp / name
+            if path.is_file():
+                try:
+                    self.measurement_fingerprints[name] = (csv_file_sha256(path), path.stat().st_mtime_ns)
+                except OSError:
+                    return LoadResult(ok=False, errors=[f"Cannot read {name}; reopen the result folder."])
+        for name in ("final_output_plant_median.csv", "latent_traits.csv", "rep_width_profiles.txt"):
+            path = rp / name
+            if path.is_file():
+                try:
+                    self.analysis_file_mtimes[name] = path.stat().st_mtime_ns
+                    self.analysis_file_digests[name] = csv_file_sha256(path)
+                except OSError:
+                    return LoadResult(ok=False, errors=[f"Cannot read {name}; reopen the result folder."])
+        try:
+            metadata_mtime = (rp / "metadata.csv").stat().st_mtime_ns
+            metadata_bytes = (rp / "metadata.csv").read_bytes()
+        except OSError:
+            metadata_bytes = None
+            if self.metadata_encoding is not None:
+                return LoadResult(ok=False, errors=["Cannot read metadata.csv; reopen the result folder."])
+        if metadata_bytes is not None:
+            if self.metadata_encoding is None and not ambiguous_csv_examples(metadata_bytes):
+                try:
+                    _, self.metadata_encoding, _ = decode_csv_bytes(metadata_bytes)
+                except UnicodeError:
+                    pass
+            if self.metadata_encoding is not None:
+                self.metadata_encoding_sha256 = hashlib.sha256(metadata_bytes).hexdigest()
+                self.metadata_encoding_mtime_ns = metadata_mtime
+            if metadata_digest is not None and metadata_digest != self.metadata_encoding_sha256:
+                return LoadResult(ok=False, errors=["metadata.csv changed while its encoding was being selected; reopen the folder."])
 
         # --- essential files ---
         meas = self._read_parquet_or_csv(rp, "measurements")
         if meas is None:
-            errors.append("measurements.csv (or .parquet) missing or unreadable")
+            errors.extend(self._csv_read_errors or ["measurements.csv (or .parquet) missing or unreadable"])
             return LoadResult(ok=False, errors=errors)
+        if "kernel_name" not in meas.columns:
+            return LoadResult(ok=False, errors=["measurements.csv (or .parquet) is missing the required kernel_name column"])
         self.measurements = meas
         # Pre-index once: avoids repeated set_index()/full-table scans per lookup.
         if "kernel_name" in meas.columns:
@@ -89,8 +178,16 @@ class DataLoader:
         meta = self._read_csv(
             rp / "metadata.csv",
             dtype={"image_name": "string", "plant_name": "string", "weight_g": "string"},
-            keep_default_na=False, na_values=[""],
+            keep_default_na=False, na_values=[""], encoding=self.metadata_encoding,
         )
+        if self.metadata_encoding_sha256 is not None:
+            try:
+                after = hashlib.sha256((rp / "metadata.csv").read_bytes()).hexdigest()
+                current_mtime = (rp / "metadata.csv").stat().st_mtime_ns
+            except OSError:
+                return LoadResult(ok=False, errors=["Cannot read metadata.csv; reopen the result folder."])
+            if after != self.metadata_encoding_sha256 or current_mtime != self.metadata_encoding_mtime_ns:
+                return LoadResult(ok=False, errors=["metadata.csv changed while loading; reopen the result folder."])
         if meta is not None:
             self.metadata = meta
             if "image_name" in meta.columns:
@@ -114,7 +211,10 @@ class DataLoader:
         else:
             warnings.append("detect_results.csv not found")
 
-        final = self._read_csv(rp / "final_output_individual.csv")
+        final = self._read_csv(
+            rp / "final_output_individual.csv", dtype={"kernel_name": "string", "plant_name": "string"},
+            keep_default_na=False, na_values=[""],
+        )
         if final is not None:
             self.final_individual = final
 
@@ -128,6 +228,8 @@ class DataLoader:
         lt = self._read_csv(rp / "latent_traits.csv", dtype={"plant_id": "string"}, keep_default_na=False, na_values=[""])
         if lt is not None:
             self.latent_traits = lt
+        if self._csv_read_errors:
+            return LoadResult(ok=False, errors=self._csv_read_errors)
 
         # --- optional JSON files ---
         contours_dir = rp / "contours"
@@ -170,6 +272,29 @@ class DataLoader:
             self._build_image_to_plant_map()
         except ValueError as error:
             return LoadResult(ok=False, errors=[str(error)])
+        if self._ambiguous_originals:
+            warnings.append(f"{len(self._ambiguous_originals)} sample(s) have conflicting original plant IDs; derived results are hidden")
+        if self._unverified_originals:
+            treatment = "using current metadata IDs by request" if self.trust_unverified_plant_ids else "derived results are hidden"
+            warnings.append(f"{len(self._unverified_originals)} sample(s) have unverified original plant IDs; {treatment}")
+        for name, expected in self.csv_digests.items():
+            try:
+                if (name in self.csv_mtimes and (rp / name).stat().st_mtime_ns != self.csv_mtimes[name]) or csv_file_sha256(rp / name) != expected:
+                    return LoadResult(ok=False, errors=[f"{name} changed while loading; reopen the result folder."])
+            except OSError:
+                return LoadResult(ok=False, errors=[f"Cannot read {name}; reopen the result folder."])
+        for name, (expected, mtime) in self.measurement_fingerprints.items():
+            try:
+                if (rp / name).stat().st_mtime_ns != mtime or csv_file_sha256(rp / name) != expected:
+                    return LoadResult(ok=False, errors=[f"{name} changed while loading; reopen the result folder."])
+            except OSError:
+                return LoadResult(ok=False, errors=[f"Cannot read {name}; reopen the result folder."])
+        for name, expected in self.analysis_file_digests.items():
+            try:
+                if (rp / name).stat().st_mtime_ns != self.analysis_file_mtimes[name] or csv_file_sha256(rp / name) != expected:
+                    return LoadResult(ok=False, errors=[f"{name} changed while loading; reopen the result folder."])
+            except OSError:
+                return LoadResult(ok=False, errors=[f"Cannot read {name}; reopen the result folder."])
 
         total = len(self.measurements)
         return LoadResult(
@@ -208,6 +333,9 @@ class DataLoader:
         # Fast path: already in legacy full-load dict
         if kernel_name in self.contours:
             return self.contours[kernel_name]
+        original_name = self.legacy_round_source(kernel_name)
+        if original_name is not None and original_name in self.contours:
+            return ContourData(kernel_name=kernel_name, contour=self.contours[original_name].contour)
         # Lazy path: look up image_stem, load per-image file if needed
         image_name = self.kernel_to_image.get(kernel_name)
         if image_name is None:
@@ -231,6 +359,8 @@ class DataLoader:
                 del self._contour_cache[old]
         # Populate ContourData
         pts = self._contour_cache[stem].get(kernel_name)
+        if pts is None and original_name is not None:
+            pts = self._contour_cache[stem].get(original_name)
         if pts is None:
             return None
         cd = ContourData(kernel_name=kernel_name, contour=pts)
@@ -238,7 +368,16 @@ class DataLoader:
         return cd
 
     def get_kernel_axis(self, kernel_name: str) -> AxisData | None:
-        return self.axis_results.get(kernel_name)
+        axis = self.axis_results.get(kernel_name)
+        original_name = self.legacy_round_source(kernel_name)
+        return axis if axis is not None or original_name is None else self.axis_results.get(original_name)
+
+    def legacy_round_source(self, kernel_name: str) -> str | None:
+        """Identify the older unsuffixed file only when no other measured kernel owns it."""
+        if not kernel_name.endswith("_round.jpg"):
+            return None
+        original_name = kernel_name[:-len("_round.jpg")] + ".jpg"
+        return None if original_name in self.kernel_to_image else original_name
 
     def get_bbox_image_name(self, image_name: str) -> str | None:
         """Resolve a unique bounding-box key without guessing between case variants."""
@@ -296,25 +435,27 @@ class DataLoader:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _read_parquet_or_csv(base: Path, stem: str) -> pd.DataFrame | None:
+    def _read_parquet_or_csv(self, base: Path, stem: str) -> pd.DataFrame | None:
         pqt = base / f"{stem}.parquet"
         csv = base / f"{stem}.csv"
         # A spreadsheet save updates the CSV, leaving an older Parquet stale.
         if csv.exists() and (not pqt.exists() or csv.stat().st_mtime_ns > pqt.stat().st_mtime_ns):
-            return DataLoader._read_csv(csv)
+            return self._read_csv(csv)
         if pqt.exists():
             try:
                 return pd.read_parquet(pqt)
             except Exception:
                 pass
-        return DataLoader._read_csv(csv)
+        return self._read_csv(csv)
 
-    @staticmethod
-    def _read_csv(path: Path, **kwargs) -> pd.DataFrame | None:
+    def _read_csv(self, path: Path, **kwargs) -> pd.DataFrame | None:
         try:
+            if "encoding" not in kwargs:
+                kwargs["encoding"] = self.csv_encodings.get(path.name)
             return read_csv_compatible(path, **kwargs)
         except Exception:
+            if path.name in self.csv_encodings:
+                self._csv_read_errors.append(f"{path.name} could not be read with the selected encoding; reopen the folder.")
             return None
 
     @staticmethod
@@ -465,28 +606,42 @@ class DataLoader:
     def _build_image_to_plant_map(self) -> None:
         """Map images to the original IDs used by existing derived results."""
         self.image_to_plant.clear()
+        self._ambiguous_originals.clear()
+        self._unverified_originals.clear()
         if self.metadata.empty or "image_name" not in self.metadata.columns:
             return
-        associations = {}
+        original_names: dict[str, str] = {}
+        ambiguous_originals: set[str] = set()
+        if {"kernel_name", "plant_name"} <= set(self.final_individual.columns):
+            for kernel, original in self.final_individual[["kernel_name", "plant_name"]].itertuples(index=False, name=None):
+                if pd.isna(kernel) or pd.isna(original):
+                    continue
+                image = self.kernel_to_image.get(str(kernel))
+                if image is None:
+                    continue
+                original = str(original)
+                if image in original_names and original_names[image] != original:
+                    ambiguous_originals.add(image)
+                else:
+                    original_names[image] = original
+        self._ambiguous_originals = ambiguous_originals
         mapping_path = Path(self.result_dir) / "metadata_original_plant_names.csv"
         if mapping_path.exists():
             mapping = self._read_csv(mapping_path, dtype=str, keep_default_na=False)
             columns = ["image_name", "source_plant_name", "current_plant_name"]
             if mapping is None or list(mapping.columns) != columns or mapping["image_name"].duplicated().any():
                 raise ValueError("Invalid metadata_original_plant_names.csv; cannot safely associate derived results.")
-            associations = {
-                row["image_name"]: (row["source_plant_name"], row["current_plant_name"])
-                for _, row in mapping.iterrows()
-            }
         for _, row in self.metadata.drop_duplicates("image_name").iterrows():
             img = str(row.get("image_name", ""))
             plant = str(row.get("plant_name", ""))
             if img:
-                if img in associations:
-                    source, current = associations[img]
-                    self.image_to_plant[img] = source if current == plant else ""
+                if img in ambiguous_originals:
+                    self.image_to_plant[img] = ""
+                elif img in original_names:
+                    self.image_to_plant[img] = original_names[img]
                 else:
-                    self.image_to_plant[img] = plant
+                    self._unverified_originals.add(img)
+                    self.image_to_plant[img] = plant if self.trust_unverified_plant_ids else ""
 
     def get_median_profile(self, image_name: str) -> list[float] | None:
         """Return the 100-point median width profile for an image's plant."""

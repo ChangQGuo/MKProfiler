@@ -505,9 +505,20 @@ try {
 } catch {
     if ([IO.File]::Exists($backup)) {
         try {
-            if (-not [IO.File]::Exists($target)) { [IO.File]::Move($backup, $target) }
-            elseif ($replaced -or (FileHash $target) -ne $oldHash) {
-                [IO.File]::Replace($backup, $target, [System.Management.Automation.Language.NullString]::Value)
+            for ($attempt = 0; $attempt -lt 120; $attempt++) {
+                try {
+                    if (-not [IO.File]::Exists($target)) { [IO.File]::Move($backup, $target) }
+                    elseif ($replaced -or (FileHash $target) -ne $oldHash) {
+                        [IO.File]::Replace($backup, $target, [System.Management.Automation.Language.NullString]::Value)
+                    }
+                    break
+                } catch {
+                    $cause = $_.Exception
+                    while ($null -ne $cause.InnerException) { $cause = $cause.InnerException }
+                    $code = $cause.HResult -band 0xffff
+                    if ($code -notin @(32, 33) -or $attempt -eq 119) { throw }
+                    [Threading.Thread]::Sleep(500)
+                }
             }
         } catch { $state = 'recovery-required' }
     }

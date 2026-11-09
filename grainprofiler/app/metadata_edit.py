@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import codecs
 import csv
+import hashlib
 import io
 import math
 import os
@@ -10,12 +12,14 @@ import stat
 import tempfile
 from pathlib import Path
 
-from grainprofiler.app.csv_io import decode_csv_bytes
+from grainprofiler.app.csv_io import ambiguous_csv_examples, decode_csv_bytes
 
 
-def _read_csv(path: Path):
+def _read_csv(path: Path, *, encoding: str | None = None, require_unambiguous: bool = False):
     original = path.read_bytes()
-    text, encoding, bom = decode_csv_bytes(original)
+    if require_unambiguous and encoding is None and ambiguous_csv_examples(original):
+        raise ValueError("The metadata CSV encoding is ambiguous. Reopen the result folder and select its encoding.")
+    text, encoding, bom = decode_csv_bytes(original, encoding=encoding)
     rows = list(csv.reader(io.StringIO(text, newline="")))
     if not rows or len(set(rows[0])) != len(rows[0]):
         raise ValueError(f"Invalid or duplicate CSV headers: {path.name}")
@@ -78,7 +82,11 @@ def _replace_files(changes):
             temporary.unlink(missing_ok=True)
 
 
-def save_metadata_edit(result_dir: str, image_name: str, key: str, value: str, expected: str) -> str:
+def save_metadata_edit(result_dir: str, image_name: str, key: str, value: str, expected: str,
+                       *, metadata_encoding: str | None = None, metadata_digest: str | None = None,
+                       mapping_encoding: str | None = None, mapping_digest: str | None = None,
+                       metadata_mtime: int | None = None, mapping_mtime: int | None = None,
+                       source_plant_name: str | None = None) -> str:
     """Save one confirmed edit, returning a warning when related IDs are ambiguous."""
     if key not in {"plant_name", "weight_g"}:
         raise ValueError("This metadata field cannot be edited.")
@@ -95,7 +103,12 @@ def save_metadata_edit(result_dir: str, image_name: str, key: str, value: str, e
 
     root = Path(result_dir)
     metadata_path = root / "metadata.csv"
-    original, rows, encoding, bom, newline = _read_csv(metadata_path)
+    original, rows, encoding, bom, newline = _read_csv(
+        metadata_path, encoding=metadata_encoding, require_unambiguous=True,
+    )
+    if ((metadata_digest is not None and hashlib.sha256(original).hexdigest() != metadata_digest)
+            or (metadata_mtime is not None and metadata_path.stat().st_mtime_ns != metadata_mtime)):
+        raise ValueError("The metadata.csv encoding selection is out of date; the file changed. Reopen the result folder.")
     header = rows[0]
     if "image_name" not in header or key not in header:
         raise ValueError("metadata.csv is missing the image or selected field.")
@@ -125,7 +138,12 @@ def save_metadata_edit(result_dir: str, image_name: str, key: str, value: str, e
         mapping_path = root / "metadata_original_plant_names.csv"
         columns = ["image_name", "source_plant_name", "current_plant_name"]
         if mapping_path.exists():
-            map_original, mapping, map_encoding, map_bom, map_newline = _read_csv(mapping_path)
+            map_original, mapping, map_encoding, map_bom, map_newline = _read_csv(
+                mapping_path, encoding=mapping_encoding, require_unambiguous=True,
+            )
+            if ((mapping_digest is not None and hashlib.sha256(map_original).hexdigest() != mapping_digest)
+                    or (mapping_mtime is not None and mapping_path.stat().st_mtime_ns != mapping_mtime)):
+                raise ValueError("The original-name association changed; reopen the result folder.")
             if mapping[0] != columns:
                 raise ValueError("Invalid metadata_original_plant_names.csv headers.")
         else:
@@ -139,8 +157,10 @@ def save_metadata_edit(result_dir: str, image_name: str, key: str, value: str, e
                 raise ValueError("The metadata association is out of date; review the result folder.")
             entry[2] = value
         else:
-            mapping.append([image_name, old, value])
-        changes.append((mapping_path, map_original, _encode_csv(mapping, map_encoding, map_bom, map_newline)))
+            mapping.append([image_name, source_plant_name or "", value])
+        # The application owns this association file. Mark its UTF-8 encoding
+        # explicitly so future edits never need to guess between encodings.
+        changes.append((mapping_path, map_original, _encode_csv(mapping, "utf-8", codecs.BOM_UTF8, map_newline)))
         warning = "Saved. Existing derived results keep their original plant ID; rerun the pipeline to update them."
     row[value_col] = value
     changes.insert(0, (metadata_path, original, _encode_csv(rows, encoding, bom, newline)))

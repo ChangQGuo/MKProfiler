@@ -186,7 +186,7 @@ def test_loader_preserves_original_image_extension_for_search_and_copy(app, sett
         encoding="utf-8",
     )
     loader = DataLoader()
-    assert loader.load(str(tmp_path)).ok
+    assert loader.load(str(tmp_path), csv_encodings={"metadata.csv": "utf-8", "measurements.csv": "utf-8"}).ok
     assert loader.get_sample_ids() == ["玉米_A.JPG"]
     assert loader.get_kernels_for_sample("玉米_A.JPG") == ["玉米_A_kernel_001.jpg"]
     assert loader.get_kernel_contour("玉米_A_kernel_001.jpg") is not None
@@ -218,7 +218,7 @@ def test_loader_deduplicates_metadata_only_image_names(tmp_path):
         encoding="utf-8",
     )
     loader = DataLoader()
-    assert loader.load(str(tmp_path)).ok
+    assert loader.load(str(tmp_path), trust_unverified_plant_ids=True).ok
     assert loader.get_sample_ids() == ["same.jpg", "other.jpg"]
     assert loader.image_to_plant["same.jpg"] == "First"
 

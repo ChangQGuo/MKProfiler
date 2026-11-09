@@ -227,7 +227,17 @@ def archive_bytes(extra=(), executable=None):
 class PreparationFixture:
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temp.cleanup)
+        def cleanup_temporary_directory():
+            deadline = time.monotonic() + 10
+            while True:
+                try:
+                    self.temp.cleanup()
+                    return
+                except PermissionError:
+                    if time.monotonic() >= deadline:
+                        raise
+                    time.sleep(0.1)
+        self.addCleanup(cleanup_temporary_directory)
         self.release = updater.parse_release_metadata(release_metadata(), OWNER, REPO)
 
     def prepare(self, content, checksum=None, release=None, broken=False):
@@ -525,6 +535,46 @@ sys.stdin.read(1)
         while not marker.exists() and time.monotonic() < deadline:
             time.sleep(0.1)
         self.assertTrue(marker.exists())
+        self.assertEqual(self.target.read_bytes(), original)
+
+    def test_failed_start_retries_rollback_while_executable_is_temporarily_locked(self):
+        compiler = updater._powershell()[1].parent / "Microsoft.NET" / "Framework64" / "v4.0.30319" / "csc.exe"
+        if not compiler.is_file():
+            self.skipTest("Windows .NET Framework C# compiler unavailable")
+        source = Path(self.temp.name) / "hold-lock.cs"
+        binary = Path(self.temp.name) / "hold-lock.exe"
+        source.write_text('''
+using System;
+using System.Diagnostics;
+using System.IO;
+using System.Threading;
+class Program {
+  static void Main(string[] args) {
+    string exe = Process.GetCurrentProcess().MainModule.FileName;
+    string marker = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "lock-held");
+    if (args.Length > 0) {
+      using (var stream = new FileStream(exe, FileMode.Open, FileAccess.Read, FileShare.Read)) {
+        File.WriteAllText(marker, "held"); Thread.Sleep(3000);
+      }
+      return;
+    }
+    Process.Start(new ProcessStartInfo(exe, "lock") { UseShellExecute = false, CreateNoWindow = true });
+    var deadline = DateTime.UtcNow.AddSeconds(5);
+    while (!File.Exists(marker) && DateTime.UtcNow < deadline) Thread.Sleep(20);
+  }
+}
+''', encoding="utf-8")
+        built = subprocess.run(
+            [str(compiler), "/nologo", "/target:winexe", "/out:" + str(binary), str(source)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20,
+        )
+        self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+        original = self.marker_executable("old-after-locked-rollback")
+        self.target.write_bytes(original)
+        prepared = self.prepare(archive_bytes(executable=binary.read_bytes()))
+        self.addCleanup(prepared.cleanup)
+        process, pending = self.start_owner(prepared.executable, prepared.exe_sha256, restart=True)
+        self.assertEqual(self.finish_owner(process, pending["status"]), "startup-failed")
         self.assertEqual(self.target.read_bytes(), original)
 
     def test_update_signalling_ready_is_kept(self):

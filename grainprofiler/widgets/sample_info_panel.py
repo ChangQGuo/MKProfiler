@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import re
 from pathlib import Path
 
@@ -219,6 +220,17 @@ class SampleInfoPanel(QScrollArea):
         self._meta_edits["kernel_count"].setText(str(len(self._kernel_names)))
         self._build_table(data_loader)
         self._load_plant_summary(data_loader, image_name)
+        if image_name in data_loader._ambiguous_originals:
+            self._meta_notice.setText("Conflicting original plant IDs; derived plant results are hidden.")
+            self._meta_notice.show()
+        elif image_name in data_loader._unverified_originals:
+            self._meta_notice.setText(
+                "Original plant ID is unverified; " + (
+                    "using the current ID by request." if data_loader.trust_unverified_plant_ids
+                    else "derived results are hidden. See Settings to use the current ID."
+                )
+            )
+            self._meta_notice.show()
 
     def _load_plant_summary(self, dl: DataLoader, image_name: str) -> None:
         """Populate plant-level median stats for the current image's plant."""
@@ -373,15 +385,35 @@ class SampleInfoPanel(QScrollArea):
         dl = self._data_loader
         image = self._current_image
         try:
-            warning = save_metadata_edit(dl.result_dir, image, key, w.text(), self._saved_meta_values[key])
+            warning = save_metadata_edit(
+                dl.result_dir, image, key, w.text(), self._saved_meta_values[key],
+                metadata_encoding=dl.metadata_encoding, metadata_digest=dl.metadata_encoding_sha256,
+                mapping_encoding=dl.csv_encodings.get("metadata_original_plant_names.csv"),
+                mapping_digest=dl.csv_digests.get("metadata_original_plant_names.csv"),
+                metadata_mtime=dl.metadata_encoding_mtime_ns,
+                mapping_mtime=dl.csv_mtimes.get("metadata_original_plant_names.csv"),
+                source_plant_name=(
+                    dl.image_to_plant.get(image) if image not in dl._unverified_originals and image not in dl._ambiguous_originals else None
+                ),
+            )
         except (OSError, UnicodeError, ValueError, csv.Error) as error:
             QMessageBox.warning(self, "Unable to save", str(error))
             return
 
+        if dl.metadata_encoding is not None:
+            try:
+                dl.metadata_encoding_sha256 = hashlib.sha256((Path(dl.result_dir) / "metadata.csv").read_bytes()).hexdigest()
+                dl.metadata_encoding_mtime_ns = (Path(dl.result_dir) / "metadata.csv").stat().st_mtime_ns
+            except OSError:
+                dl.metadata_encoding_sha256 = "unavailable"
+        if key == "plant_name":
+            dl.csv_encodings.pop("metadata_original_plant_names.csv", None)
+            dl.csv_digests.pop("metadata_original_plant_names.csv", None)
+            dl.csv_mtimes.pop("metadata_original_plant_names.csv", None)
         metadata = dl._read_csv(
             Path(dl.result_dir) / "metadata.csv",
             dtype={"image_name": "string", "plant_name": "string", "weight_g": "string"},
-            keep_default_na=False, na_values=[""],
+            keep_default_na=False, na_values=[""], encoding=dl.metadata_encoding,
         )
         if metadata is not None:
             dl.metadata = metadata

@@ -41,7 +41,7 @@ class VAELatentWindow(QWidget):
     _LATENT_STEP = 0.01
     _SLIDER_MULT = 100         # slider uses int, spinbox uses float
 
-    def __init__(self, data_path: str, latent_csv: str, dark: bool = True, parent=None):
+    def __init__(self, data_path: str, latent_csv: str, dark: bool = True, parent=None, *, csv_encoding: str | None = None):
         super().__init__(parent)
         self._dark = dark
         self._ok = False
@@ -64,7 +64,7 @@ class VAELatentWindow(QWidget):
         self._latents: dict[str, list[float]] = {}     # original 5-dim latent values
 
         try:
-            self._load_data(data_path, latent_csv)
+            self._load_data(data_path, latent_csv, csv_encoding=csv_encoding)
         except Exception as e:
             QMessageBox.critical(self, "VAE Error", str(e))
             return
@@ -75,6 +75,7 @@ class VAELatentWindow(QWidget):
 
         self._current_name: str = ""
         self._orig_latents: list[float] = []
+        self._latent_available = False
         self._updating_ui: bool = False  # guard against recursive signal loops
 
         self._ok = True
@@ -88,7 +89,7 @@ class VAELatentWindow(QWidget):
     # Data loading
     # ------------------------------------------------------------------
 
-    def _load_data(self, profile_txt: str, latent_csv: str) -> None:
+    def _load_data(self, profile_txt: str, latent_csv: str, *, csv_encoding: str | None = None) -> None:
         """Read width profiles and latent traits."""
         # Profiles
         with open(profile_txt, encoding='utf-8') as f:
@@ -109,13 +110,24 @@ class VAELatentWindow(QWidget):
 
         # Latent traits
         try:
-            df = read_csv_compatible(latent_csv, dtype=str, keep_default_na=False)
-            for _, row in df.iterrows():
-                plant = str(row.iloc[0])
-                vals = [float(row.iloc[i + 1]) for i in range(5)]
-                self._latents[plant] = vals
+            df = read_csv_compatible(latent_csv, encoding=csv_encoding, dtype=str, keep_default_na=False)
         except Exception:
-            pass  # latent traits optional — just use zeros
+            return
+        columns = [f"latent_{i}" for i in range(1, 6)]
+        if not set(columns) <= set(df.columns):
+            columns = [f"z{i}" for i in range(1, 6)]
+        if "plant_id" not in df.columns or not set(columns) <= set(df.columns):
+            return
+        duplicates = set(df.loc[df["plant_id"].duplicated(keep=False), "plant_id"])
+        for plant, *values in df[["plant_id", *columns]].itertuples(index=False, name=None):
+            if not plant or plant in duplicates:
+                continue
+            try:
+                vals = [float(value) for value in values]
+            except (TypeError, ValueError):
+                continue
+            if np.isfinite(vals).all():
+                self._latents[plant] = vals
 
     # ------------------------------------------------------------------
     # UI
@@ -174,6 +186,9 @@ class VAELatentWindow(QWidget):
         note.setStyleSheet(f"color:{tc}; font-style: italic;")
         note.setWordWrap(True)
         rl.addWidget(note)
+        self._latent_notice = QLabel()
+        self._latent_notice.setWordWrap(True)
+        rl.addWidget(self._latent_notice)
 
         self._sliders: list[QSlider] = []
         self._spinboxes: list[QDoubleSpinBox] = []
@@ -214,9 +229,9 @@ class VAELatentWindow(QWidget):
             rl.addWidget(dim_box)
 
         # Reset button
-        reset_btn = QPushButton("Reset to Original")
-        reset_btn.clicked.connect(self._on_reset)
-        rl.addWidget(reset_btn)
+        self._reset_btn = QPushButton("Reset to Original")
+        self._reset_btn.clicked.connect(self._on_reset)
+        rl.addWidget(self._reset_btn)
         rl.addStretch()
 
         splitter.addWidget(right)
@@ -233,7 +248,12 @@ class VAELatentWindow(QWidget):
         self._current_name = name
         raw_profile = self._profiles.get(name)
 
-        # Get latent values (use zeros if not found)
+        self._latent_available = name in self._latents
+        self._latent_notice.setText(
+            "" if self._latent_available else "Saved latent traits are unavailable; controls start at zero for manual exploration."
+        )
+        self._reset_btn.setText("Reset to Original" if self._latent_available else "Reset to Zero")
+        # Zero is an exploration default, not a measurement for this plant.
         latents = self._latents.get(name, [0.0] * 5)
         if len(latents) < 5:
             latents = [0.0] * 5
@@ -281,7 +301,8 @@ class VAELatentWindow(QWidget):
         if original is not None:
             ax.plot(xs, original, color="#2C6FAC", linewidth=2.0, label="Original")
 
-        ax.plot(xs, reconstructed, color="#E0853A", linewidth=2.0, linestyle="--", label="VAE Recon")
+        label = "VAE Recon" if self._latent_available else "VAE decode (no saved latent)"
+        ax.plot(xs, reconstructed, color="#E0853A", linewidth=2.0, linestyle="--", label=label)
 
         ax.set_xlabel("Position along normalized axis (%)", color=tc, fontfamily="Times New Roman", fontsize=14)
         ax.set_ylabel("Full Width (scaled)", color=tc, fontfamily="Times New Roman", fontsize=14)

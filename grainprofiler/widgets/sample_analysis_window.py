@@ -27,13 +27,13 @@ class SampleAnalysisWindow(QWidget):
         ("median_perimeter_mm", "Median Perimeter (mm)"),
     ]
 
-    def __init__(self, data_path: str, dark: bool = True, parent=None):
+    def __init__(self, data_path: str, dark: bool = True, parent=None, *, csv_encoding: str | None = None):
         super().__init__(parent)
         self._dark = dark
         self._ok = False
 
         try:
-            self._df = read_csv_compatible(data_path)
+            self._df = read_csv_compatible(data_path, encoding=csv_encoding)
         except Exception as e:
             QMessageBox.critical(self, "Error", str(e))
             return

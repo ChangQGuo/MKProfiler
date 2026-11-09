@@ -92,6 +92,10 @@ class KernelDetailDialog(QDialog):
 
         # --- Subimage ---
         sub_path = Path(self._result_dir) / "subimages" / kn
+        if not sub_path.exists():
+            original_name = dl.legacy_round_source(kn)
+            if original_name is not None:
+                sub_path = sub_path.with_name(original_name)
         img_np = load_image(str(sub_path))
         if img_np is None:
             label = QLabel(f"Subimage not found:\n{sub_path}")

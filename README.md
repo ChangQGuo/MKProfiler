@@ -25,6 +25,8 @@ The public release covers 15,278 valid ear images and approximately 0.38M kernel
 
 The desktop application does not require Python, CUDA, or conda environments.
 It reads CSV files saved as UTF-8, UTF-16 with a byte-order mark, or GB18030. If `measurements.csv` is newer than `measurements.parquet`, the viewer uses the CSV.
+When an unmarked CSV has an ambiguous encoding, choose the preview that displays the text correctly. Existing derived results use original identifiers from `final_output_individual.csv` when available; unverified associations are hidden unless enabled explicitly in **Settings**. Some pipeline scripts require UTF-8 CSV; prepare a UTF-8 copy before rerunning them.
+Kernel deletion is temporarily disabled when both CSV and Parquet measurement files are present.
 
 ### Process your own photos — GPU + conda
 

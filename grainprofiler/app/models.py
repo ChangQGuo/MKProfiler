@@ -45,3 +45,4 @@ class LoadResult:
     warnings: list[str] = field(default_factory=list)
     image_names: list[str] = field(default_factory=list)
     total_kernels: int = 0
+    ambiguous_csvs: dict[str, tuple[str, str, str]] = field(default_factory=dict)

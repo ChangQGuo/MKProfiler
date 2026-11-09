@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import csv
+import hashlib
+import os
 import re
+import stat
 import sys
+import tempfile
 from pathlib import Path
 from threading import Thread
 
@@ -31,6 +36,7 @@ from PySide6.QtWidgets import (
 
 from grainprofiler import __version__
 from grainprofiler.app.appearance import THEMES, appearance_stylesheet
+from grainprofiler.app.csv_io import csv_file_sha256, remove_csv_record
 from grainprofiler.app.data_loader import DataLoader
 from grainprofiler.app.settings import WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH
 from grainprofiler.app.updater import check_for_update, prepare_update, schedule_install
@@ -203,6 +209,7 @@ class MainWindow(QMainWindow):
         self._corn_cursor = create_corn_cursor()
 
         self._data_loader: DataLoader | None = None
+        self._csv_encoding_keys: dict[str, str] = {}
         self._result_dir: str = ""
         self._update_checking = False
         self._update_downloading = False
@@ -411,6 +418,11 @@ class MainWindow(QMainWindow):
         shortcut_action = QAction("Keyboard shortcuts...", self)
         shortcut_action.triggered.connect(self._show_shortcut_settings)
         settings_menu.addAction(shortcut_action)
+        self._trust_plant_ids_action = QAction("Use unverified current plant IDs", self)
+        self._trust_plant_ids_action.setCheckable(True)
+        self._trust_plant_ids_action.setEnabled(False)
+        self._trust_plant_ids_action.triggered.connect(self._toggle_unverified_plant_ids)
+        settings_menu.addAction(self._trust_plant_ids_action)
 
         help_menu = mb.addMenu("&Help")
         update_action = QAction("Check for updates...", self)
@@ -485,6 +497,23 @@ class MainWindow(QMainWindow):
     # Slots
     # ------------------------------------------------------------------
 
+    def _choose_csv_encoding(self, filename: str, examples: tuple[str, str]) -> str | None:
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Question)
+        dialog.setTextFormat(Qt.PlainText)
+        dialog.setWindowTitle("Choose CSV encoding")
+        dialog.setText(f"{filename} can be decoded in two ways. Select the version that displays your text correctly.")
+        dialog.setInformativeText(f"UTF-8: {examples[0]}\n\nGB18030: {examples[1]}")
+        utf8 = dialog.addButton("UTF-8", QMessageBox.AcceptRole)
+        chinese = dialog.addButton("GB18030", QMessageBox.AcceptRole)
+        dialog.addButton(QMessageBox.Cancel)
+        dialog.exec()
+        if dialog.clickedButton() is utf8:
+            return "utf-8"
+        if dialog.clickedButton() is chinese:
+            return "gb18030"
+        return None
+
     def _on_folder_opened(self, result_dir: str) -> None:
         if self._info_panel is not None and self._info_panel.has_pending_metadata_edits():
             answer = QMessageBox.question(
@@ -495,13 +524,40 @@ class MainWindow(QMainWindow):
                 return
         dl = DataLoader()
         result = dl.load(result_dir)
+        choices, digests, mtimes, encoding_keys = {}, {}, {}, {}
+        for filename, (utf8, chinese, file_digest) in result.ambiguous_csvs.items():
+            path = Path(result_dir) / filename
+            path_digest = hashlib.sha256(str(path.resolve()).casefold().encode("utf-8")).hexdigest()
+            encoding_key = "csv_encodings/" + path_digest
+            try:
+                file_mtime = path.stat().st_mtime_ns
+            except OSError:
+                QMessageBox.warning(self, "Result file changed", f"Cannot read {filename}; reopen the result folder.")
+                return
+            fingerprint = file_digest + ":" + str(file_mtime) + ":"
+            cached = str(self._settings.value(encoding_key, ""))
+            if cached in (fingerprint + "utf-8", fingerprint + "gb18030"):
+                selected = cached.rsplit(":", 1)[1]
+            else:
+                selected = self._choose_csv_encoding(filename, (utf8, chinese))
+                if selected is None:
+                    return
+                self._settings.setValue(encoding_key, fingerprint + selected)
+            choices[filename] = selected
+            digests[filename] = file_digest
+            mtimes[filename] = file_mtime
+            encoding_keys[filename] = encoding_key
+        if choices:
+            dl = DataLoader()
+            result = dl.load(result_dir, csv_encodings=choices, csv_digests=digests, csv_mtimes=mtimes)
         if not result.ok:
             QMessageBox.critical(self, "Load Error", "\n".join(result.errors))
             return
         self._data_loader = dl
+        self._csv_encoding_keys = encoding_keys
+        self._trust_plant_ids_action.setChecked(False)
+        self._trust_plant_ids_action.setEnabled(bool(dl._unverified_originals))
         self._result_dir = result_dir
-        if result.warnings:
-            self._status.showMessage(f"Loaded with {len(result.warnings)} warning(s)")
         self._build_workspace()
         self._restore_splitter_sizes()
         plant_names = {}
@@ -511,9 +567,10 @@ class MainWindow(QMainWindow):
         self._nav_panel.populate(dl.get_sample_ids(), result_dir, plant_names=plant_names)
         self._median_action.setEnabled(True)
         self._cal_action.setEnabled(True)
-        self._status.showMessage(
-            f"Loaded {len(dl.image_names)} samples, {result.total_kernels} kernels"
-        )
+        message = f"Loaded {len(dl.image_names)} samples, {result.total_kernels} kernels"
+        if result.warnings:
+            message += " | " + "; ".join(result.warnings)
+        self._status.showMessage(message)
         self._stack.setCurrentIndex(1)
         if self._sample_view is not None:
             self._sample_view.setFocus(Qt.OtherFocusReason)
@@ -536,13 +593,44 @@ class MainWindow(QMainWindow):
         self._status.showMessage(f"Sample: {image_name}")
 
     def _on_metadata_saved(self, image_name: str) -> None:
+        if self._data_loader is not None and "metadata.csv" in self._csv_encoding_keys:
+            try:
+                digest = csv_file_sha256(Path(self._result_dir) / "metadata.csv")
+                mtime = (Path(self._result_dir) / "metadata.csv").stat().st_mtime_ns
+                self._data_loader.csv_digests["metadata.csv"] = digest
+                self._data_loader.csv_mtimes["metadata.csv"] = mtime
+                self._settings.setValue(self._csv_encoding_keys["metadata.csv"], digest + ":" + str(mtime) + ":" + self._data_loader.metadata_encoding)
+            except OSError:
+                pass
         if self._sample_view is not None:
             self._sample_view.update_metadata_caption(image_name)
         if self._data_loader is not None:
+            self._trust_plant_ids_action.setEnabled(bool(self._data_loader._unverified_originals))
             metadata = self._data_loader.get_image_metadata(image_name)
             if metadata is not None:
                 name = metadata.get("plant_name", "")
                 self._nav_panel.update_plant_name(image_name, str(name) if name is not None else "")
+
+    def _toggle_unverified_plant_ids(self, checked: bool) -> None:
+        if self._data_loader is None:
+            return
+        if self._info_panel is not None and self._info_panel.has_pending_metadata_edits():
+            QMessageBox.warning(self, "Unsaved metadata", "Save or discard pending edits before changing this setting.")
+            self._trust_plant_ids_action.setChecked(not checked)
+            return
+        if checked:
+            answer = QMessageBox.question(
+                self, "Unverified plant IDs",
+                "Some original plant IDs cannot be verified. If names were changed externally, using current IDs may display another plant's derived results. Continue?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                self._trust_plant_ids_action.setChecked(False)
+                return
+        self._data_loader.trust_unverified_plant_ids = checked
+        self._data_loader._build_image_to_plant_map()
+        if self._current_image_name:
+            self._on_sample_selected(self._current_image_name)
 
     def _set_navigation_shortcuts(self, previous: str, next_: str) -> None:
         previous_key = QKeySequence.fromString(previous, QKeySequence.PortableText)
@@ -1091,22 +1179,72 @@ class MainWindow(QMainWindow):
         import pandas as pd
         from pathlib import Path
 
-        # 1. Remove from measurements.csv (and .parquet, so the delete survives reload)
+        # 1. Update only one unambiguous measurements file.
         meas_csv = Path(result_dir) / "measurements.csv"
         meas_pqt = Path(result_dir) / "measurements.parquet"
-        df = None
-        if meas_csv.exists():
-            df = pd.read_csv(meas_csv)
-            df = df[df["kernel_name"] != kn]
-            df.to_csv(meas_csv, index=False)
-        if meas_pqt.exists():
+        for path in (meas_csv, meas_pqt):
+            expected = dl.measurement_fingerprints.get(path.name)
             try:
-                if df is None:
-                    df = pd.read_parquet(meas_pqt)
+                unchanged = (not path.exists()) if expected is None else (
+                    path.stat().st_mtime_ns == expected[1] and csv_file_sha256(path) == expected[0]
+                )
+            except OSError:
+                unchanged = False
+            if not unchanged:
+                QMessageBox.warning(self, "Result file changed", f"{path.name} changed after loading. Reopen the result folder before deleting a kernel.")
+                return
+        if meas_csv.exists() and meas_pqt.exists():
+            QMessageBox.warning(
+                self, "Unable to delete kernel",
+                "Both measurements.csv and measurements.parquet are present. Deletion is disabled until the two copies are reconciled, to avoid overwriting newer data.",
+            )
+            return
+        if meas_csv.exists():
+            try:
+                remove_csv_record(
+                    meas_csv, "kernel_name", kn,
+                    encoding=dl.csv_encodings.get("measurements.csv"),
+                    expected_sha256=dl.measurement_fingerprints["measurements.csv"][0],
+                    expected_mtime=dl.measurement_fingerprints["measurements.csv"][1],
+                )
+            except (OSError, UnicodeError, ValueError, csv.Error) as error:
+                QMessageBox.warning(self, "Unable to delete kernel", str(error))
+                return
+            dl.measurement_fingerprints["measurements.csv"] = (csv_file_sha256(meas_csv), meas_csv.stat().st_mtime_ns)
+            if "measurements.csv" in dl.csv_encodings:
+                digest = csv_file_sha256(meas_csv)
+                mtime = meas_csv.stat().st_mtime_ns
+                dl.csv_digests["measurements.csv"] = digest
+                dl.csv_mtimes["measurements.csv"] = mtime
+                if "measurements.csv" in self._csv_encoding_keys:
+                    self._settings.setValue(
+                        self._csv_encoding_keys["measurements.csv"], digest + ":" + str(mtime) + ":" + dl.csv_encodings["measurements.csv"],
+                    )
+        if meas_pqt.exists():
+            staged = None
+            try:
+                original_digest, original_mtime = dl.measurement_fingerprints["measurements.parquet"]
+                df = pd.read_parquet(meas_pqt)
+                if "kernel_name" not in df.columns or kn not in set(df["kernel_name"].astype(str)):
+                    raise ValueError("The selected kernel was not found in measurements.parquet.")
                 df = df[df["kernel_name"] != kn]
-                df.to_parquet(meas_pqt, index=False)
-            except Exception:
-                pass
+                with tempfile.NamedTemporaryFile(dir=meas_pqt.parent, prefix=".mkprofiler-", suffix=".parquet", delete=False) as target:
+                    staged = Path(target.name)
+                df.to_parquet(staged, index=False)
+                os.chmod(staged, stat.S_IMODE(meas_pqt.stat().st_mode))
+                if meas_pqt.stat().st_mtime_ns != original_mtime or csv_file_sha256(meas_pqt) != original_digest:
+                    raise OSError("measurements.parquet changed while saving; reopen the folder.")
+                os.replace(staged, meas_pqt)
+                dl.measurement_fingerprints["measurements.parquet"] = (csv_file_sha256(meas_pqt), meas_pqt.stat().st_mtime_ns)
+            except Exception as error:
+                QMessageBox.warning(self, "Unable to delete kernel", str(error))
+                return
+            finally:
+                if staged is not None:
+                    try:
+                        staged.unlink(missing_ok=True)
+                    except OSError:
+                        pass
 
         # 2. Remove from kernel_width_profiles.txt
         kwp_path = Path(result_dir) / "kernel_width_profiles.txt"
@@ -1190,6 +1328,8 @@ class MainWindow(QMainWindow):
         if not txt_path.exists():
             QMessageBox.warning(self, "PCA", "rep_width_profiles.txt not found")
             return
+        if not self._analysis_file_is_current(txt_path):
+            return
         from grainprofiler.widgets.pca_window import PCAPanel
         # Remove old PCA panel if exists (cleanup mpl callbacks first)
         if hasattr(self, '_pca_panel') and self._pca_panel is not None:
@@ -1217,6 +1357,19 @@ class MainWindow(QMainWindow):
     # VAE Latent Explorer
     # ------------------------------------------------------------------
 
+    def _analysis_file_is_current(self, path: Path) -> bool:
+        expected = self._data_loader.analysis_file_digests.get(path.name)
+        try:
+            unchanged = (not path.exists()) if expected is None else (
+                path.stat().st_mtime_ns == self._data_loader.analysis_file_mtimes[path.name]
+                and csv_file_sha256(path) == expected
+            )
+        except OSError:
+            unchanged = False
+        if not unchanged:
+            QMessageBox.warning(self, "Result file changed", f"{path.name} changed after loading. Reopen the result folder before analysis.")
+        return unchanged
+
     def _on_vae_latent(self) -> None:
         if self._data_loader is None:
             self._status.showMessage("Open a result folder first")
@@ -1224,6 +1377,8 @@ class MainWindow(QMainWindow):
         from pathlib import Path
         profile_txt = Path(self._result_dir) / "rep_width_profiles.txt"
         latent_csv = Path(self._result_dir) / "latent_traits.csv"
+        if not self._analysis_file_is_current(profile_txt) or not self._analysis_file_is_current(latent_csv):
+            return
         if not profile_txt.exists():
             QMessageBox.warning(self, "VAE", "rep_width_profiles.txt not found")
             return
@@ -1238,7 +1393,10 @@ class MainWindow(QMainWindow):
                     pass
             old.deleteLater()
             self._vae_panel = None
-        panel = VAELatentWindow(str(profile_txt), str(latent_csv), self._dark_mode)
+        panel = VAELatentWindow(
+            str(profile_txt), str(latent_csv), self._dark_mode,
+            csv_encoding=self._data_loader.csv_encodings.get("latent_traits.csv"),
+        )
         if not panel.is_ok:
             return
         panel.back_clicked.connect(self._on_vae_latent_back)
@@ -1259,6 +1417,8 @@ class MainWindow(QMainWindow):
             return
         from pathlib import Path
         csv = Path(self._result_dir) / "final_output_plant_median.csv"
+        if not self._analysis_file_is_current(csv):
+            return
         if not csv.exists():
             QMessageBox.warning(self, "Analysis", "final_output_plant_median.csv not found")
             return
@@ -1273,7 +1433,10 @@ class MainWindow(QMainWindow):
                     pass
             old.deleteLater()
             self._trait_panel = None
-        panel = SampleAnalysisWindow(str(csv), self._dark_mode)
+        panel = SampleAnalysisWindow(
+            str(csv), self._dark_mode,
+            csv_encoding=self._data_loader.csv_encodings.get("final_output_plant_median.csv"),
+        )
         if not panel.is_ok:
             return
         panel.back_clicked.connect(self._on_trait_back)

@@ -45,6 +45,10 @@ def results(tmp_path):
         {"plant_name": "001", "median_length_mm": "10"},
         {"plant_name": "002", "median_length_mm": "20"},
     ])
+    write("final_output_individual.csv", ["kernel_name", "plant_name"], [
+        {"kernel_name": "image_a_kernel_001.jpg", "plant_name": "001"},
+        {"kernel_name": "image_b_kernel_001.jpg", "plant_name": "002"},
+    ])
     loader = DataLoader()
     assert loader.load(str(tmp_path)).ok
     return tmp_path, loader
@@ -204,7 +208,7 @@ def test_shared_plant_name_does_not_rename_another_sample_latent(app, results):
         writer.writeheader()
         writer.writerows(rows)
     loader = DataLoader()
-    assert loader.load(str(root)).ok
+    assert loader.load(str(root), trust_unverified_plant_ids=True).ok
     panel = SampleInfoPanel()
     panel.load_sample("image_a.jpg", loader)
     panel._lock_btn.click()
@@ -213,7 +217,7 @@ def test_shared_plant_name_does_not_rename_another_sample_latent(app, results):
     assert read_rows(path)[1]["plant_name"] == "001"
     assert read_rows(root / "latent_traits.csv")[0]["plant_id"] == "001"
     assert loader.image_to_plant["image_a.jpg"] == "001"
-    assert loader.image_to_plant["image_b.jpg"] == "001"
+    assert loader.image_to_plant["image_b.jpg"] == "002"
 
 
 def test_failed_second_write_restores_original_metadata(app, results, monkeypatch):
@@ -355,7 +359,7 @@ def test_repeated_renames_retain_original_derived_identity(app, results):
     assert reopened.image_to_plant["image_a.jpg"] == "001"
 
 
-def test_external_name_change_disables_stale_derived_association(app, results):
+def test_external_name_change_uses_verified_original_derived_identity(app, results):
     root, loader = results
     panel = SampleInfoPanel()
     panel.load_sample("image_a.jpg", loader)
@@ -370,8 +374,8 @@ def test_external_name_change_disables_stale_derived_association(app, results):
         writer.writerows(rows)
     reopened = DataLoader()
     assert reopened.load(str(root)).ok
-    assert reopened.image_to_plant["image_a.jpg"] == ""
-    assert reopened.get_median_profile("image_a.jpg") is None
+    assert reopened.image_to_plant["image_a.jpg"] == "001"
+    assert reopened.get_plant_median("001")["median_length_mm"] == 10
 
 
 def test_saved_metadata_updates_photo_caption(app, results):
