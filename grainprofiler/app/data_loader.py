@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import csv
 import hashlib
+import io
 import json
 import re
 from pathlib import Path
@@ -11,7 +13,8 @@ from typing import Any
 import pandas as pd
 
 from grainprofiler.app.csv_io import (
-    ambiguous_csv_examples, ambiguous_csv_file, csv_file_sha256, decode_csv_bytes, read_csv_compatible,
+    ambiguous_csv_examples, ambiguous_csv_file, csv_file_sha256, decode_csv_bytes,
+    decode_metadata_with_damaged_ocr, read_csv_compatible,
 )
 from grainprofiler.app.models import (
     AxisData,
@@ -25,7 +28,7 @@ _KERNEL_NAME_RE = re.compile(r"^(.+)_kernel_(\d+)(?:_round)?(\.jpg)?$")
 _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp"}
 _RESULT_CSVS = (
     "measurements.csv", "metadata.csv", "detect_results.csv", "final_output_individual.csv",
-    "final_output_plant_median.csv", "latent_traits.csv", "metadata_original_plant_names.csv",
+    "final_output_plant_median.csv", "median_outlines.csv", "latent_traits.csv", "metadata_original_plant_names.csv",
 )
 
 
@@ -38,6 +41,7 @@ class DataLoader:
     def __init__(self) -> None:
         self.result_dir: str = ""
         self.metadata_encoding: str | None = None
+        self.metadata_damaged_ocr = False
         self.metadata_encoding_sha256: str | None = None
         self.metadata_encoding_mtime_ns: int | None = None
         self.csv_encodings: dict[str, str] = {}
@@ -53,6 +57,7 @@ class DataLoader:
         self.measurements: pd.DataFrame = pd.DataFrame()
         self.final_individual: pd.DataFrame = pd.DataFrame()
         self.plant_medians: pd.DataFrame = pd.DataFrame()
+        self.plant_medians_source: str = ""
         self.contours: dict[str, ContourData] = {}
         self._contour_files: dict[str, Path] = {}     # image_stem → per-image JSON path
         self._contour_cache: dict[str, dict[str, list[list[float]]]] = {}  # LRU cache
@@ -180,6 +185,10 @@ class DataLoader:
             dtype={"image_name": "string", "plant_name": "string", "weight_g": "string"},
             keep_default_na=False, na_values=[""], encoding=self.metadata_encoding,
         )
+        if self.metadata_damaged_ocr and metadata_bytes is not None:
+            self.metadata_encoding = "utf-8"
+            self.metadata_encoding_sha256 = hashlib.sha256(metadata_bytes).hexdigest()
+            self.metadata_encoding_mtime_ns = metadata_mtime
         if self.metadata_encoding_sha256 is not None:
             try:
                 after = hashlib.sha256((rp / "metadata.csv").read_bytes()).hexdigest()
@@ -204,6 +213,8 @@ class DataLoader:
                         self._image_names_by_stem[stem] = image_name
         else:
             warnings.append("metadata.csv missing or unreadable")
+        if self.metadata_damaged_ocr:
+            warnings.append("metadata.csv contains unreadable OCR text bytes; other fields were retained")
 
         det = self._read_csv(rp / "detect_results.csv")
         if det is not None:
@@ -218,11 +229,16 @@ class DataLoader:
         if final is not None:
             self.final_individual = final
 
-        pm = self._read_csv(rp / "final_output_plant_median.csv", dtype={"plant_name": "string"}, keep_default_na=False, na_values=[""])
+        median_file = "final_output_plant_median.csv"
+        if not (rp / median_file).is_file() and (rp / "median_outlines.csv").is_file():
+            median_file = "median_outlines.csv"
+        pm = self._read_csv(rp / median_file, dtype={"plant_name": "string"}, keep_default_na=False, na_values=[""])
         if pm is not None:
             self.plant_medians = pm
+            self.plant_medians_source = median_file
             if "plant_name" in pm.columns:
-                self._plant_index = pm.drop_duplicates("plant_name").set_index(
+                unique = pm.drop_duplicates("plant_name", keep=False) if median_file == "median_outlines.csv" else pm.drop_duplicates("plant_name")
+                self._plant_index = unique.set_index(
                     "plant_name", drop=False)
 
         lt = self._read_csv(rp / "latent_traits.csv", dtype={"plant_id": "string"}, keep_default_na=False, na_values=[""])
@@ -423,13 +439,18 @@ class DataLoader:
         except KeyError:
             return None
 
-    def get_plant_median(self, plant_name: str) -> pd.Series | None:
+    def get_plant_median(self, plant_name: str, image_name: str | None = None) -> pd.Series | None:
         if self._plant_index is None:
             return None
         try:
-            return self._plant_index.loc[plant_name]
+            row = self._plant_index.loc[plant_name]
         except KeyError:
             return None
+        if self.plant_medians_source == "median_outlines.csv" and image_name and "source_images" in row:
+            source_images = row["source_images"]
+            if pd.isna(source_images) or image_name not in {name.strip() for name in str(source_images).split(";")}:
+                return None
+        return row
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -453,10 +474,22 @@ class DataLoader:
             if "encoding" not in kwargs:
                 kwargs["encoding"] = self.csv_encodings.get(path.name)
             return read_csv_compatible(path, **kwargs)
+        except UnicodeDecodeError:
+            if path.name == "metadata.csv" and kwargs.get("encoding") in (None, "utf-8"):
+                try:
+                    text, _ = decode_metadata_with_damaged_ocr(path.read_bytes())
+                    visible = text.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
+                    options = {key: value for key, value in kwargs.items() if key != "encoding"}
+                    frame = pd.read_csv(io.StringIO(visible), **options)
+                    self.metadata_damaged_ocr = True
+                    return frame
+                except (OSError, UnicodeError, ValueError, csv.Error):
+                    pass
         except Exception:
-            if path.name in self.csv_encodings:
-                self._csv_read_errors.append(f"{path.name} could not be read with the selected encoding; reopen the folder.")
-            return None
+            pass
+        if path.name in self.csv_encodings:
+            self._csv_read_errors.append(f"{path.name} could not be read with the selected encoding; reopen the folder.")
+        return None
 
     @staticmethod
     def _read_json(path: Path) -> Any | None:

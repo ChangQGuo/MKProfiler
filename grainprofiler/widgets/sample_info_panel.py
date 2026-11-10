@@ -46,7 +46,7 @@ _STYLE_LIGHT = """
 """
 
 _COLS_DISPLAY = [
-    "kernel_name", "length_px", "max_width_px",
+    "kernel_name", "length_px", "max_width_px", "max_breadth_px",
     "area_px2", "perimeter_px", "circularity", "length_width_ratio", "eccentricity",
 ]
 _CAL_COL = "cal_px"
@@ -220,28 +220,34 @@ class SampleInfoPanel(QScrollArea):
         self._meta_edits["kernel_count"].setText(str(len(self._kernel_names)))
         self._build_table(data_loader)
         self._load_plant_summary(data_loader, image_name)
+        notices = []
+        if data_loader.metadata_damaged_ocr:
+            notices.append("Some OCR text contains unreadable bytes; those bytes are preserved when metadata is saved.")
         if image_name in data_loader._ambiguous_originals:
-            self._meta_notice.setText("Conflicting original plant IDs; derived plant results are hidden.")
-            self._meta_notice.show()
+            notices.append("Conflicting original plant IDs; derived plant results are hidden.")
         elif image_name in data_loader._unverified_originals:
-            self._meta_notice.setText(
+            notices.append(
                 "Original plant ID is unverified; " + (
                     "using the current ID by request." if data_loader.trust_unverified_plant_ids
                     else "derived results are hidden. See Settings to use the current ID."
                 )
             )
+        if notices:
+            self._meta_notice.setText("\n".join(notices))
             self._meta_notice.show()
 
     def _load_plant_summary(self, dl: DataLoader, image_name: str) -> None:
         """Populate plant-level median stats for the current image's plant."""
         plant = dl.image_to_plant.get(image_name, "")
-        row = dl.get_plant_median(plant) if plant else None
+        row = dl.get_plant_median(plant, image_name) if plant else None
         if row is None:
             for lbl in self._plant_lbls.values():
                 lbl.setText("—")
             return
         for key, lbl in self._plant_lbls.items():
             val = row.get(key)
+            if key == "median_max_width_mm" and (val is None or pd.isna(val)):
+                val = row.get("median_max_breadth_mm")
             if val is None or (not isinstance(val, str) and pd.isna(val)):
                 lbl.setText("—")
             elif key in ("median_length_mm", "median_max_width_mm", "median_area_mm2"):

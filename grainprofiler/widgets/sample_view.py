@@ -291,7 +291,7 @@ class SampleView(QGraphicsView):
             if meas is not None:
                 td = {
                     "length": f"{meas.get('length_px', 0):.1f} px",
-                    "max_width": f"{meas.get('max_width_px', 0):.1f} px",
+                    "max_width": f"{meas.get('max_width_px', meas.get('max_breadth_px', 0)):.1f} px",
                     "area": f"{meas.get('area_px2', 0):.0f} px2",
                     "circularity": f"{meas.get('circularity', 0):.4f}",
                 }

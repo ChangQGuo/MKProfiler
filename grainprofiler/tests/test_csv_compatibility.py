@@ -75,6 +75,105 @@ def test_spreadsheet_encoded_plant_medians_work_in_analysis(app, tmp_path):
     assert window._df.loc[0, "weight_per_kernel_g"] == 2.0
 
 
+def test_plant_summary_uses_median_outlines_when_final_table_is_absent(app, tmp_path):
+    (tmp_path / "measurements.csv").write_text("kernel_name,length_px,max_breadth_px\na_kernel_001.jpg,10,8\n", encoding="utf-8")
+    (tmp_path / "metadata.csv").write_text("image_name,plant_name,weight_g\na.jpg,corrected,1\n", encoding="utf-8")
+    (tmp_path / "final_output_individual.csv").write_text("kernel_name,plant_name\na_kernel_001.jpg,original\n", encoding="utf-8")
+    (tmp_path / "median_outlines.csv").write_text(
+        "plant_name,source_images,n_kernels,median_length_mm,median_max_breadth_mm,median_area_mm2,median_circularity\n"
+        "original,a.jpg,37,11.5682,7.8662,70.0528,0.7853\n", encoding="utf-8",
+    )
+    loader = DataLoader()
+    assert loader.load(str(tmp_path)).ok
+    panel = SampleInfoPanel()
+    panel.load_sample("a.jpg", loader)
+    assert panel._meta_edits["kernel_count"].text() == "1"
+    assert panel._pandas_model._df.loc[0, "max_breadth_px"] == 8
+    assert panel._plant_lbls["n_kernels"].text() == "37"
+    assert panel._plant_lbls["median_length_mm"].text() == "11.57"
+    assert panel._plant_lbls["median_max_width_mm"].text() == "7.87"
+    assert panel._plant_lbls["median_area_mm2"].text() == "70.05"
+
+
+def test_metadata_with_damaged_ocr_bytes_remains_readable_and_editable(app, tmp_path):
+    (tmp_path / "measurements.csv").write_text("kernel_name,length_px\na_kernel_001.jpg,10\n", encoding="utf-8")
+    metadata = tmp_path / "metadata.csv"
+    metadata.write_bytes(
+        b'image_name,plant_name,weight_g,label_ocr_texts\na.jpg,A,1,"ocr:'
+        + '玉米'.encode('utf-8') + b'\x81"\n'
+    )
+    loader = DataLoader()
+    result = loader.load(str(tmp_path))
+    assert result.ok
+    assert loader.get_image_metadata("a.jpg")["plant_name"] == "A"
+    panel = SampleInfoPanel()
+    panel.load_sample("a.jpg", loader)
+    assert panel._meta_edits["weight_g"].text() == "1"
+    panel._lock_btn.click()
+    panel._meta_edits["weight_g"].setText("2.5")
+    panel._save_btns["weight_g"].click()
+    panel._meta_edits["plant_name"].setText("玉米新品种")
+    panel._save_btns["plant_name"].click()
+    raw = metadata.read_bytes()
+    assert b'\x81' in raw and '玉米'.encode('utf-8') in raw
+    rows = list(csv.DictReader(raw.decode("utf-8-sig", errors="surrogateescape").splitlines()))
+    assert rows[0]["weight_g"] == "2.5"
+    assert rows[0]["label_ocr_texts"].encode("utf-8", "surrogateescape") == b'ocr:' + '玉米'.encode('utf-8') + b'\x81'
+    reopened = DataLoader()
+    assert reopened.load(str(tmp_path)).ok
+    assert reopened.get_image_metadata("a.jpg")["weight_g"] == "2.5"
+    assert reopened.get_image_metadata("a.jpg")["plant_name"] == "玉米新品种"
+
+
+def test_damaged_bytes_outside_ocr_do_not_produce_guessed_metadata(tmp_path):
+    (tmp_path / "measurements.csv").write_text("kernel_name,length_px\na_kernel_001.jpg,10\n", encoding="utf-8")
+    (tmp_path / "metadata.csv").write_bytes(b'image_name,plant_name,weight_g,label_ocr_texts\na.jpg,A\x81,1,text\n')
+    loader = DataLoader()
+    result = loader.load(str(tmp_path))
+    assert result.ok
+    assert loader.get_image_metadata("a.jpg") is None
+
+
+def test_median_outlines_never_matches_an_unrelated_source_image(app, tmp_path):
+    (tmp_path / "measurements.csv").write_text("kernel_name,length_px\na_kernel_001.jpg,10\n", encoding="utf-8")
+    (tmp_path / "metadata.csv").write_text("image_name,plant_name,weight_g\na.jpg,A,1\n", encoding="utf-8")
+    (tmp_path / "final_output_individual.csv").write_text("kernel_name,plant_name\na_kernel_001.jpg,A\n", encoding="utf-8")
+    (tmp_path / "median_outlines.csv").write_text("plant_name,source_images,n_kernels\nA,other.jpg,42\n", encoding="utf-8")
+    loader = DataLoader()
+    assert loader.load(str(tmp_path)).ok
+    panel = SampleInfoPanel()
+    panel.load_sample("a.jpg", loader)
+    assert panel._plant_lbls["n_kernels"].text() == "—"
+
+
+def test_duplicate_plant_rows_in_median_outlines_are_not_guessed(app, tmp_path):
+    (tmp_path / "measurements.csv").write_text("kernel_name,length_px\na_kernel_001.jpg,10\n", encoding="utf-8")
+    (tmp_path / "metadata.csv").write_text("image_name,plant_name,weight_g\na.jpg,A,1\n", encoding="utf-8")
+    (tmp_path / "final_output_individual.csv").write_text("kernel_name,plant_name\na_kernel_001.jpg,A\n", encoding="utf-8")
+    (tmp_path / "median_outlines.csv").write_text(
+        "plant_name,source_images,n_kernels\nA,a.jpg,5\nA,a.jpg,42\n", encoding="utf-8",
+    )
+    loader = DataLoader()
+    assert loader.load(str(tmp_path)).ok
+    panel = SampleInfoPanel()
+    panel.load_sample("a.jpg", loader)
+    assert panel._plant_lbls["n_kernels"].text() == "—"
+
+
+def test_final_plant_median_has_precedence_over_median_outlines(app, tmp_path):
+    (tmp_path / "measurements.csv").write_text("kernel_name,length_px\na_kernel_001.jpg,10\n", encoding="utf-8")
+    (tmp_path / "metadata.csv").write_text("image_name,plant_name,weight_g\na.jpg,A,1\n", encoding="utf-8")
+    (tmp_path / "final_output_individual.csv").write_text("kernel_name,plant_name\na_kernel_001.jpg,A\n", encoding="utf-8")
+    (tmp_path / "final_output_plant_median.csv").write_text("plant_name,n_kernels,median_max_breadth_mm\nA,5,6.5\n", encoding="utf-8")
+    (tmp_path / "median_outlines.csv").write_text("plant_name,source_images,n_kernels\nA,a.jpg,42\n", encoding="utf-8")
+    loader = DataLoader()
+    assert loader.load(str(tmp_path)).ok
+    panel = SampleInfoPanel()
+    panel.load_sample("a.jpg", loader)
+    assert panel._plant_lbls["n_kernels"].text() == "5"
+    assert panel._plant_lbls["median_max_width_mm"].text() == "6.50"
+
+
 def test_invalid_latent_row_does_not_hide_later_samples_or_imply_zero_is_original(app, tmp_path):
     from grainprofiler.widgets.vae_latent_window import VAELatentWindow
 

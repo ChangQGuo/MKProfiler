@@ -1,5 +1,19 @@
 # MKProfiler Release Notes / 版本更新日志
 
+## v1.3.2 — 2026-11-10
+
+### English
+
+- Display plant summaries from `median_outlines.csv` when the final summary is unavailable, with source-image checks and correct maximum-breadth values.
+- Show the `max_breadth_px` measurement in the kernel table and contour tooltip.
+- Read recoverable metadata when malformed bytes are confined to OCR text, preserving those bytes on confirmed edits.
+
+### 中文
+
+- 当最终植株汇总表缺失时，使用 `median_outlines.csv` 显示植株汇总，检查来源图片并正确显示最大宽度。
+- 在单粒表格和轮廓提示中显示 `max_breadth_px` 宽度数据。
+- 当异常字节仅存在于 OCR 文本中时，读取可用元数据，并在确认修改时保留这些原始字节。
+
 ## v1.3.1 — 2026-11-09
 
 ### English

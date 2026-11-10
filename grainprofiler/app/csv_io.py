@@ -5,6 +5,7 @@ from __future__ import annotations
 import codecs
 import csv
 import hashlib
+import io
 import os
 import stat
 import tempfile
@@ -93,6 +94,34 @@ def decode_csv_bytes(data: bytes, encoding: str | None = None) -> tuple[str, str
         except UnicodeDecodeError as error:
             last_error = error
     raise last_error
+
+
+def decode_metadata_with_damaged_ocr(data: bytes) -> tuple[str, bytes]:
+    """Keep damaged OCR bytes when all other metadata fields are unambiguous."""
+    bom = codecs.BOM_UTF8 if data.startswith(codecs.BOM_UTF8) else b""
+    if data.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        raise ValueError("Unsupported damaged metadata encoding")
+    text = data[len(bom):].decode("utf-8", "surrogateescape")
+    rows = csv.reader(io.StringIO(text, newline=""), strict=True)
+    header = next(rows, None)
+    if not header or len(set(header)) != len(header) or "label_ocr_texts" not in header:
+        raise ValueError("Invalid damaged metadata headers")
+    ocr_column = header.index("label_ocr_texts")
+    damaged = False
+    for row in rows:
+        if len(row) != len(header):
+            raise ValueError("Malformed damaged metadata row")
+        for index, value in enumerate(row):
+            if "\x00" in value:
+                raise ValueError("Invalid metadata character")
+            has_damaged_bytes = any("\udc80" <= char <= "\udcff" for char in value)
+            if index == ocr_column:
+                damaged = damaged or has_damaged_bytes
+            elif has_damaged_bytes or (not bom and not value.isascii()):
+                raise ValueError("Damaged or ambiguous bytes outside the OCR text")
+    if not damaged:
+        raise ValueError("No damaged OCR bytes found")
+    return text, bom
 
 
 def read_csv_compatible(path: str | Path, *, encoding: str | None = None, **kwargs) -> pd.DataFrame:

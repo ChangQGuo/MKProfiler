@@ -25,6 +25,7 @@
 
 桌面软件不需要 Python、CUDA、conda 环境。
 软件支持读取 UTF-8、带字节序标记的 UTF-16 和 GB18030 编码的 CSV；当 `measurements.csv` 比 `measurements.parquet` 更新时，优先读取 CSV。
+当最终植株汇总表缺失时，样本页面可使用 `median_outlines.csv` 显示植株性状。
 如果 CSV 未标记编码且存在歧义，请根据预览选择文字显示正确的编码。已有派生结果在可用时按 `final_output_individual.csv` 中的原始标识关联；无法核实的关联默认隐藏，可在 **Settings** 中明确启用。部分 pipeline 脚本要求 UTF-8 格式，重新运行前请准备 UTF-8 编码的 CSV 副本。
 当 CSV 和 Parquet 测量表同时存在时，暂时禁用单粒删除。
 

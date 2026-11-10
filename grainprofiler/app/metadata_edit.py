@@ -12,14 +12,20 @@ import stat
 import tempfile
 from pathlib import Path
 
-from grainprofiler.app.csv_io import ambiguous_csv_examples, decode_csv_bytes
+from grainprofiler.app.csv_io import ambiguous_csv_examples, decode_csv_bytes, decode_metadata_with_damaged_ocr
 
 
 def _read_csv(path: Path, *, encoding: str | None = None, require_unambiguous: bool = False):
     original = path.read_bytes()
     if require_unambiguous and encoding is None and ambiguous_csv_examples(original):
         raise ValueError("The metadata CSV encoding is ambiguous. Reopen the result folder and select its encoding.")
-    text, encoding, bom = decode_csv_bytes(original, encoding=encoding)
+    try:
+        text, encoding, bom = decode_csv_bytes(original, encoding=encoding)
+    except UnicodeDecodeError:
+        if path.name != "metadata.csv" or encoding not in (None, "utf-8"):
+            raise
+        text, _ = decode_metadata_with_damaged_ocr(original)
+        encoding, bom = "utf-8", codecs.BOM_UTF8
     rows = list(csv.reader(io.StringIO(text, newline="")))
     if not rows or len(set(rows[0])) != len(rows[0]):
         raise ValueError(f"Invalid or duplicate CSV headers: {path.name}")
@@ -31,7 +37,7 @@ def _read_csv(path: Path, *, encoding: str | None = None, require_unambiguous: b
 def _encode_csv(rows, encoding, bom, newline):
     output = io.StringIO(newline="")
     csv.writer(output, lineterminator=newline).writerows(rows)
-    return bom + output.getvalue().encode(encoding)
+    return bom + output.getvalue().encode(encoding, errors="surrogateescape")
 
 
 def _replace_files(changes):
